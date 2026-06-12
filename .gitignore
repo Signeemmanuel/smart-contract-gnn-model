@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# Large data and model artefacts — never committed (see README).
+# Published as release assets or regenerated from the pipeline.
+data/raw/*
+data/interim/*
+data/processed/*
+*.pt
+*.ckpt
+*.parquet
+
+# ...but keep the empty directory skeleton in git.
+!data/**/.gitkeep
+!**/.gitkeep

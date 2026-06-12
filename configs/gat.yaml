@@ -1,0 +1,4 @@
+# Inherit base.yaml and override the architecture only, so any difference
+# between runs is attributable to the architecture.
+extends: base.yaml
+conv: gat

@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scgnn"
+version = "0.1.0"
+description = "Graph-neural-network pipeline for detecting security flaws in Ethereum smart contracts (inference package)."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Signe Josue Emmanuel" }]
+keywords = ["smart-contracts", "graph-neural-network", "vulnerability-detection", "solidity"]
+
+# Core, inference-time dependencies: everything `analyze_source` needs at
+# serving time, and nothing more. `scgnn-api` gets exactly this set from
+# `pip install scgnn`. These are version *floors* for resolvability; the exact,
+# reproducible pins for a reported run live in a committed lockfile (see the
+# README), because the correct torch / torch-geometric build depends on the
+# CUDA image of the target machine and cannot be hard-coded portably here.
+dependencies = [
+    "numpy>=1.26,<3",
+    "torch>=2.2",
+    "torch-geometric>=2.5",
+    "transformers>=4.40",
+    "scikit-learn>=1.4",
+    "slither-analyzer>=0.10",
+]
+
+[project.optional-dependencies]
+# Training-only stack: needed to label, train and evaluate, never at serving
+# time. Installed in this repo with `pip install -e ".[training]"`.
+# Mythril and Securify are driven through SmartBugs, which is installed
+# separately per its own instructions and is not pip-pinnable here.
+training = [
+    "snorkel>=0.9",
+    "mythril>=0.23",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "pyyaml>=6.0",
+    "matplotlib>=3.7",
+    "tqdm>=4.62",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+# Ship the inference package only. `training`, `tests`, `scripts`, `configs`
+# and `data` are part of the repository but are deliberately excluded from the
+# built wheel, so the back end can never accidentally import training code.
+include = ["scgnn*"]
+exclude = ["training*", "tests*", "scripts*", "configs*", "data*"]
