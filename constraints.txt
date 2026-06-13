@@ -1,0 +1,3 @@
+# Lock the Studio's preinstalled, CUDA-matched torch so no later install
+# silently replaces it with a different build. Pass with `pip install -c`.
+torch==2.8.0+cu128

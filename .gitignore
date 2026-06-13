@@ -22,3 +22,6 @@ data/processed/*
 # ...but keep the empty directory skeleton in git.
 !data/**/.gitkeep
 !**/.gitkeep
+
+dump_codebase.py
+codebase_dump.txt
