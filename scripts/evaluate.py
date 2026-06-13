@@ -12,19 +12,22 @@ def main() -> int:
     ap.add_argument("--test-index", required=True)
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--config", required=True)
+    ap.add_argument("--feature-config", default="data/processed/feature_config.json")
     args = ap.parse_args()
 
     import numpy as np
     import torch
-    import yaml
     from torch.utils.data import DataLoader
 
+    from scgnn.extraction.features import FeatureConfig
     from scgnn.models.dual_gnn import build_model
+    from training.config import load_config
     from training.evaluate.metrics import per_flaw_and_macro
     from training.train.collate import collate_pairs
     from training.train.dataset import ContractPairDataset
 
-    config = yaml.safe_load(open(args.config, encoding="utf-8"))
+    config = load_config(args.config)
+    config["in_dim"] = FeatureConfig.from_json(args.feature_config).in_dim
     model = build_model(config)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=True))
     model.eval()

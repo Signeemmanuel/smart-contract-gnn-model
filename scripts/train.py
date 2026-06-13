@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Train one architecture from a YAML config. Status: needs the training stack."""
+"""Train one architecture from a YAML config. Status: needs the training stack.
+
+Resolves config inheritance (``extends``) and injects ``in_dim`` from the built
+feature config, since input width is data-derived, not a hyper-parameter.
+"""
 
 from __future__ import annotations
 
@@ -13,18 +17,21 @@ def main() -> int:
     ap.add_argument("--config", required=True, help="YAML experiment config.")
     ap.add_argument("--train-index", required=True)
     ap.add_argument("--val-index", required=True)
+    ap.add_argument("--feature-config", default="data/processed/feature_config.json")
     ap.add_argument("--out", default="runs/exp")
     args = ap.parse_args()
 
     import numpy as np
-    import yaml
     from torch.utils.data import DataLoader
 
+    from scgnn.extraction.features import FeatureConfig
+    from training.config import load_config
     from training.train.collate import collate_pairs
     from training.train.dataset import ContractPairDataset
     from training.train.train import train_model
 
-    config = yaml.safe_load(open(args.config, encoding="utf-8"))
+    config = load_config(args.config)
+    config["in_dim"] = FeatureConfig.from_json(args.feature_config).in_dim
     set_seed(int(config.get("seed", 42)))
 
     train_ds = ContractPairDataset(args.train_index)

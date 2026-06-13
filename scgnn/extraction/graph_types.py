@@ -46,6 +46,31 @@ class RawGraph:
             indeg[d] += 1
         return indeg, outdeg
 
+    def to_dict(self) -> dict:
+        """Plain-JSON form. ``node_lines`` int keys become strings (JSON rule)."""
+        return {
+            "view": self.view,
+            "node_types": list(self.node_types),
+            "snippets": list(self.snippets),
+            "depths": list(self.depths),
+            "n_children": list(self.n_children),
+            "edges": [[int(s), int(d)] for s, d in self.edges],
+            "node_lines": {str(k): list(v) for k, v in self.node_lines.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RawGraph":
+        """Inverse of :meth:`to_dict`; restores int keys and tuple edges."""
+        return cls(
+            view=d["view"],
+            node_types=list(d["node_types"]),
+            snippets=list(d["snippets"]),
+            depths=list(d["depths"]),
+            n_children=list(d["n_children"]),
+            edges=[(int(s), int(dd)) for s, dd in d["edges"]],
+            node_lines={int(k): list(v) for k, v in d["node_lines"].items()},
+        )
+
 
 def byte_offset_to_line(source_bytes: bytes, offset: int) -> int:
     """Convert a solc byte offset into a 1-based line number.

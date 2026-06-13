@@ -36,11 +36,17 @@ def cfg_from_nodes(collected: list[dict[str, Any]]) -> RawGraph:
     return g
 
 
-def extract_cfg(path: str) -> RawGraph:
-    """Extract a contract-level CFG with Slither. Needs Slither + solc."""
+def extract_cfg(path: str, solc_binary: str | None = None) -> RawGraph:
+    """Extract a contract-level CFG with Slither. Needs Slither + solc.
+
+    ``solc_binary`` is passed straight to Slither's ``solc`` keyword (the binary
+    location), so each contract compiles with the version matching its pragma
+    rather than whatever ``solc`` happens to be on PATH.
+    """
     from slither import Slither  # imported lazily so the package imports without Slither
 
-    sl = Slither(path)
+    kwargs = {"solc": solc_binary} if solc_binary else {}
+    sl = Slither(path, **kwargs)
     nodes: list[Any] = []
     index: dict[int, int] = {}
     for contract in sl.contracts:

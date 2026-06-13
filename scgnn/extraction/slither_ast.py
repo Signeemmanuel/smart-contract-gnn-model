@@ -65,15 +65,16 @@ def _parse_src(src: str) -> tuple[int, int]:
     return start, length
 
 
-def extract_ast(path: str, solc_binary: str = "solc") -> RawGraph:
+def extract_ast(path: str, solc_binary: str = "solc", timeout: float | None = 180) -> RawGraph:
     """Compile ``path`` with solc and assemble its AST graph.
 
-    Needs a solc matching the contract pragma on PATH (use solc-select). Raises
-    on compilation failure; the caller should skip and log such contracts.
+    Needs a solc matching the contract pragma (pass ``solc_binary``). ``timeout``
+    bounds the solc subprocess so a pathological contract can't hang forever.
+    Raises on compilation failure or timeout; the caller should skip and log.
     """
     out = subprocess.run(
         [solc_binary, "--ast-compact-json", path],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=timeout,
     ).stdout
     brace = out.find("{")
     if brace < 0:
