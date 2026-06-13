@@ -155,7 +155,8 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
 
 
 def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
-                embed_dim: int = 64, seed: int = 42, extract_timeout: float = 120) -> dict:
+                embed_dim: int = 64, seed: int = 42, extract_timeout: float = 120,
+                embed_batch: int = 128) -> dict:
     """Extract, fit train-only artefacts, encode every split, write indices.
 
     ``extract_fn(path) -> (ast RawGraph, cfg RawGraph)``;
@@ -204,7 +205,9 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     train_ids = [it.cid for it in plan.items if it.split == "train" and it.cid in raws]
     train_graphs = [g for cid in train_ids for g in raws[cid]]
     train_snippets = sorted({s for cid in train_ids for g in raws[cid] for s in g.snippets})
-    emb = (np.vstack([embedder.embed(s) for s in train_snippets])
+    print(f"  embedding {len(train_snippets)} unique train snippets (batch {embed_batch}) ...",
+          flush=True)
+    emb = (embedder.embed_many(train_snippets, batch_size=embed_batch)
            if train_snippets else np.zeros((0, 768), np.float32))
     # Clamp PCA dims for small (e.g. --max-wild smoke) runs.
     k = int(min(embed_dim, emb.shape[0] or embed_dim, emb.shape[1] or embed_dim))

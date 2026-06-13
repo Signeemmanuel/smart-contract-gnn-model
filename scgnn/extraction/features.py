@@ -81,6 +81,44 @@ class CodeBERTEmbedder:
         self._cache[key] = vec
         return vec
 
+    def embed_many(self, snippets: list[str], batch_size: int = 128) -> np.ndarray:
+        """Embed many snippets with batched forward passes; orders of magnitude
+        faster than per-snippet calls on a GPU.
+
+        Cache hits are served directly; only misses are tokenised and run, in
+        ``batch_size`` chunks with attention-masked mean pooling — so each
+        snippet's vector is identical to :meth:`embed` (which pools an unpadded
+        sequence). Cache keys match :meth:`embed`, so the two paths interoperate.
+        """
+        n = len(snippets)
+        if n == 0:
+            return np.zeros((0, 768), np.float32)
+        torch = self._torch
+        out: list[np.ndarray | None] = [None] * n
+        keys = [hashlib.sha1(s.encode("utf-8")).hexdigest() for s in snippets]
+        todo_idx: list[int] = []
+        for i, k in enumerate(keys):
+            hit = self._cache.get(k)
+            if hit is not None:
+                out[i] = hit
+            else:
+                todo_idx.append(i)
+        for b in range(0, len(todo_idx), batch_size):
+            batch = todo_idx[b:b + batch_size]
+            texts = [snippets[i] or " " for i in batch]
+            with torch.no_grad():
+                ids = self.tok(texts, return_tensors="pt", padding=True,
+                               truncation=True, max_length=64).to(self.device)
+                hs = self.enc(**ids).last_hidden_state                 # [B, T, 768]
+                mask = ids["attention_mask"].unsqueeze(-1).type_as(hs)  # [B, T, 1]
+                pooled = (hs * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+                vecs = pooled.cpu().numpy()
+            for j, i in enumerate(batch):
+                v = vecs[j]
+                out[i] = v
+                self._cache[keys[i]] = v
+        return np.vstack(out).astype(np.float32)
+
 
 class FeatureEncoder:
     """Turn a :class:`RawGraph` into model-ready features.
@@ -107,23 +145,31 @@ class FeatureEncoder:
         return vec
 
     def encode_array(self, raw: RawGraph) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(x, edge_index)`` as numpy arrays. Pure; unit-tested."""
+        """Return ``(x, edge_index)`` as numpy arrays. Pure; unit-tested.
+
+        When the embedder exposes ``embed_many`` the snippet block is embedded in
+        one batched call (much faster on a GPU); otherwise it falls back to
+        per-node ``embed``. Either path yields the same result.
+        """
         indeg, outdeg = raw.degrees()
+        n = raw.n_nodes
+        use_emb = self.embedder is not None and self.pca is not None
+        base_cols = len(self.config.node_types) + len(self.config.structural)
         rows: list[np.ndarray] = []
-        embeds: list[np.ndarray] | None = [] if (self.embedder and self.pca is not None) else None
-        for i in range(raw.n_nodes):
+        for i in range(n):
             onehot = self._one_hot(raw.node_types[i])
             struct = np.array([raw.depths[i], raw.n_children[i], indeg[i], outdeg[i]], dtype=np.float32)
-            parts = [onehot, struct]
-            if embeds is not None:
-                embeds.append(self.embedder.embed(raw.snippets[i]))
-            rows.append(np.concatenate(parts))
-        base = np.vstack(rows) if rows else np.zeros((0, len(self.config.node_types) + len(self.config.structural)), np.float32)
-        if embeds is not None:
-            reduced = self.pca.transform(np.vstack(embeds)).astype(np.float32) if embeds else \
-                np.zeros((0, self.config.embed_dim), np.float32)
-            base = np.hstack([base, reduced]) if base.shape[0] else \
-                np.zeros((0, self.config.in_dim), np.float32)
+            rows.append(np.concatenate([onehot, struct]))
+        base = np.vstack(rows) if rows else np.zeros((0, base_cols), np.float32)
+        if use_emb:
+            if n:
+                many = getattr(self.embedder, "embed_many", None)
+                emb_mat = (many(raw.snippets) if many is not None
+                           else np.vstack([self.embedder.embed(s) for s in raw.snippets]))
+                reduced = self.pca.transform(emb_mat).astype(np.float32)
+                base = np.hstack([base, reduced])
+            else:
+                base = np.zeros((0, self.config.in_dim), np.float32)
         edge_index = (np.array(raw.edges, dtype=np.int64).T
                       if raw.edges else np.zeros((2, 0), dtype=np.int64))
         return base.astype(np.float32), edge_index

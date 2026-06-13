@@ -35,3 +35,26 @@ def test_encode_array_shape_onehot_and_unknown_handling():
     assert edge_index.shape == (2, 2)
     # structural block sits right after the one-hot block
     assert list(x[0, 2:6]) == [0.0, 2.0, 0.0, 2.0]  # depth, n_children, in_deg, out_deg
+
+
+class StubBatchEmbedder(StubEmbedder):
+    """Same per-snippet vectors as StubEmbedder, but exposes a batched path."""
+    def embed_many(self, snippets, batch_size: int = 128):
+        return (np.vstack([self.embed(s) for s in snippets]) if snippets
+                else np.zeros((0, self.DIM), np.float32))
+
+
+def test_encode_array_batched_matches_per_node():
+    cfg = FeatureConfig(node_types=["FunctionDefinition", "Assignment"], embed_dim=8)
+    train = np.random.default_rng(1).random((20, StubEmbedder.DIM))
+    pca = PCA(n_components=8, random_state=0).fit(train)
+    per_node = FeatureEncoder(cfg, StubEmbedder(), pca).encode_array(_graph())[0]
+    batched = FeatureEncoder(cfg, StubBatchEmbedder(), pca).encode_array(_graph())[0]
+    assert per_node.shape == batched.shape == (3, cfg.in_dim)
+    assert np.allclose(per_node, batched)        # embed_many path == embed path
+
+
+def test_encode_array_no_embed_block_when_pca_none():
+    cfg = FeatureConfig(node_types=["FunctionDefinition", "Assignment"], embed_dim=8)
+    x, _ = FeatureEncoder(cfg, StubBatchEmbedder(), pca=None).encode_array(_graph())
+    assert x.shape == (3, len(cfg.node_types) + 4)   # one-hot + structural only

@@ -33,6 +33,8 @@ def main() -> int:
     ap.add_argument("--extract-timeout", type=float, default=120,
                     help="Per-contract extraction time budget (s); a hung Slither/solc is "
                          "aborted and the contract skipped.")
+    ap.add_argument("--embed-batch", type=int, default=128,
+                    help="CodeBERT embedding batch size (raise to use more GPU).")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--solc", default=None,
                     help="Force one solc binary for every contract; default resolves "
@@ -80,7 +82,7 @@ def main() -> int:
     extract_fn = lambda path: extract_contract(path, solc_binary=args.solc, binaries=binaries)
     report = materialise(plan, extract_fn, embedder, args.out,
                          embed_dim=args.embed_dim, seed=args.seed,
-                         extract_timeout=args.extract_timeout)
+                         extract_timeout=args.extract_timeout, embed_batch=args.embed_batch)
     print("build report:", report)
     return 0
 
