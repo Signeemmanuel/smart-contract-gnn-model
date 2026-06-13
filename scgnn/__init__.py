@@ -15,12 +15,15 @@ not pay for importing PyTorch. The determinism helper lives at
 from __future__ import annotations
 
 from scgnn.schema import (
+    FLAW_DASP,
+    FLAW_DISPLAY_NAMES,
     FLAW_INDEX,
     FLAWS,
     N_FLAWS,
     AnalysisResult,
     FlawResult,
     FlawType,
+    display_name,
     validate_flaw_code,
 )
 
@@ -34,5 +37,8 @@ __all__ = [
     "FLAWS",
     "FLAW_INDEX",
     "N_FLAWS",
+    "FLAW_DISPLAY_NAMES",
+    "FLAW_DASP",
+    "display_name",
     "validate_flaw_code",
 ]

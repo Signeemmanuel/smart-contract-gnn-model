@@ -12,6 +12,18 @@ def test_canonical_order_is_fixed():
     assert [FLAW_INDEX[c] for c in FLAWS] == list(range(5))
 
 
+def test_display_names_match_proposal_and_cover_all_codes():
+    from scgnn.schema import FLAW_DISPLAY_NAMES, FLAW_DASP, display_name
+    # every code has a display name + DASP number, and nothing extra
+    assert set(FLAW_DISPLAY_NAMES) == set(FLAWS)
+    assert set(FLAW_DASP) == set(FLAWS)
+    # the proposal's exact wording for the two that differ from the code label
+    assert display_name("arithmetic") == "Integer Overflow/Underflow"
+    assert display_name("unchecked_calls") == "Unchecked Low-Level Calls"
+    assert display_name(FlawType.DOS) == "Denial of Service (DoS)"
+    assert FLAW_DASP["reentrancy"] == 1 and FLAW_DASP["dos"] == 5
+
+
 def test_enum_is_string_valued():
     assert FlawType.REENTRANCY == "reentrancy"
     assert validate_flaw_code(FlawType.DOS) == "dos"

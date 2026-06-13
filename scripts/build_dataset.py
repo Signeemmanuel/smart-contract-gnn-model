@@ -55,16 +55,18 @@ def main() -> int:
 
     from scgnn.extraction.extract import extract_contract
     from scgnn.extraction.features import CodeBERTEmbedder
-    from scgnn.extraction.solc import installed_solc_binaries
+    from scgnn.extraction.solc import installed_solc_binaries, installed_solc_full
     from training.data.build import materialise, plan_splits
 
     binaries = installed_solc_binaries()
+    full_binaries = installed_solc_full()
     if args.solc is None and not binaries:
         print("WARNING: no solc-select binaries discovered under ~/.solc-select/artifacts; "
               "extraction will fall back to PATH solc and likely fail on old contracts. "
               "Install them with e.g. 'solc-select install 0.4.26 0.5.17 0.6.12 0.7.6 0.8.19'.")
     elif args.solc is None:
         print("solc binaries by minor:", {k: Path(v).name for k, v in binaries.items()})
+        print("exact solc versions available:", sorted(full_binaries))
     from training.data.curated import load_curated
 
     wild_paths = {p.stem: str(p) for p in Path(args.wild_dir).rglob("*.sol")}
@@ -79,7 +81,8 @@ def main() -> int:
     print("split plan:", plan.counts)
 
     embedder = CodeBERTEmbedder(device=args.device)
-    extract_fn = lambda path: extract_contract(path, solc_binary=args.solc, binaries=binaries)
+    extract_fn = lambda path: extract_contract(path, solc_binary=args.solc,
+                                                binaries=binaries, full_binaries=full_binaries)
     report = materialise(plan, extract_fn, embedder, args.out,
                          embed_dim=args.embed_dim, seed=args.seed,
                          extract_timeout=args.extract_timeout, embed_batch=args.embed_batch)

@@ -1,0 +1,17 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "threshold": 0.7,
+  "conv": "sage",
+  "hid": 128,
+  "layers": 3,
+  "heads": 4,
+  "dropout": 0.5,
+  "n_classes": 5,
+  "lr": 0.001,
+  "weight_decay": 1e-05,
+  "batch_size": 32,
+  "epochs": 200,
+  "patience": 15,
+  "in_dim": 127
+}

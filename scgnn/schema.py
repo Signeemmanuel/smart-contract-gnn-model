@@ -63,6 +63,24 @@ FLAW_INDEX: dict[str, int] = {code: i for i, code in enumerate(FLAWS)}
 #: Number of flaw classes. Defined once; import it rather than hard-coding ``5``.
 N_FLAWS: int = len(FLAWS)
 
+#: Human-readable names, matching the proposal's wording exactly. The short codes
+#: above are stable machine identifiers (the wire contract, label-matrix columns
+#: and model output order); these are what reports, figures, the model card and
+#: the dashboard should display, so the code and the dissertation read the same.
+FLAW_DISPLAY_NAMES: dict[str, str] = {
+    "reentrancy": "Reentrancy",
+    "access_control": "Access Control",
+    "arithmetic": "Integer Overflow/Underflow",
+    "unchecked_calls": "Unchecked Low-Level Calls",
+    "dos": "Denial of Service (DoS)",
+}
+
+#: DASP-10 category number for each flaw (the taxonomy the proposal cites).
+FLAW_DASP: dict[str, int] = {
+    "reentrancy": 1, "access_control": 2, "arithmetic": 3,
+    "unchecked_calls": 4, "dos": 5,
+}
+
 
 def validate_flaw_code(code: "str | FlawType") -> str:
     """Return the canonical flaw code string if known, otherwise raise.
@@ -78,6 +96,16 @@ def validate_flaw_code(code: "str | FlawType") -> str:
     if key not in FLAW_INDEX:
         raise ValueError(f"unknown flaw code {code!r}; expected one of {FLAWS}")
     return key
+
+
+def display_name(code: "str | FlawType") -> str:
+    """Return the proposal/DASP human-readable name for a canonical flaw code.
+
+    Use this anywhere a flaw is shown to a person (report tables, figures, the
+    model card, the dashboard) so the wording matches the proposal exactly,
+    while the stored/transmitted value stays the stable code.
+    """
+    return FLAW_DISPLAY_NAMES[validate_flaw_code(code)]
 
 
 @dataclass

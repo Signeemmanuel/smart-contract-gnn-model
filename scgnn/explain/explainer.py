@@ -16,7 +16,10 @@ This is the fiddliest module in the repo, so the design is explicit:
 
 from __future__ import annotations
 
-from scgnn.explain.localise import rank_unique
+from scgnn.explain.localise import (
+    line_scores_from_importance,
+    merge_line_scores,
+)
 
 
 def _branch_explainer(model, branch: str, fixed_other_pooled, class_idx: int):
@@ -69,9 +72,42 @@ def explain_branch(model, this_data, other_pooled, branch, class_idx,
     return nodes_to_lines(top, node_lines)
 
 
+def _branch_line_scores(model, this_data, other_pooled, branch, class_idx,
+                        node_lines, epochs=200):
+    """Per-line normalised importance for one branch/class.
+
+    Same validated GNNExplainer construction as ``explain_branch``, but returns
+    a ``{line: score in [0,1]}`` map (plus unmapped diagnostic nodes) so scores
+    can be compared and merged across the two branches rather than concatenated.
+    """
+    from torch_geometric.explain import Explainer, GNNExplainer
+    from torch_geometric.explain.config import ModelConfig
+
+    bm = _branch_explainer(model, branch, other_pooled, class_idx)
+    explainer = Explainer(
+        model=bm,
+        algorithm=GNNExplainer(epochs=epochs),
+        explanation_type="model",
+        node_mask_type="attributes",
+        edge_mask_type="object",
+        model_config=ModelConfig(mode="binary_classification",
+                                 task_level="graph", return_type="raw"),
+    )
+    expl = explainer(this_data.x, this_data.edge_index)
+    importance = expl.node_mask.sum(dim=1).detach().cpu().tolist()
+    return line_scores_from_importance(importance, node_lines)
+
+
 def explain_lines(model, ast_data, cfg_data, class_idx, ast_lines, cfg_lines,
                   k=5, epochs=200):
-    """Union of AST- and CFG-branch line attributions for one flaw class.
+    """Cross-branch line attribution for one flaw class.
+
+    Each branch is explained separately (the other branch's pooled vector held
+    fixed), its node importances are normalised to ``[0,1]`` and mapped to source
+    lines, then the two line-score maps are merged by maximum and ranked
+    globally. This replaces the earlier "all AST lines then all CFG lines"
+    concatenation, under which a line the CFG branch localised strongly could
+    never reach the top-k because every AST line preceded it.
 
     Returns ``(lines, unmapped)`` where ``unmapped`` aggregates nodes (across
     both branches) that had no source line.
@@ -80,11 +116,14 @@ def explain_lines(model, ast_data, cfg_data, class_idx, ast_lines, cfg_lines,
 
     model.eval()
     with torch.no_grad():
-        batch_ast = torch.zeros(ast_data.x.size(0), dtype=torch.long)
-        batch_cfg = torch.zeros(cfg_data.x.size(0), dtype=torch.long)
+        batch_ast = torch.zeros(ast_data.x.size(0), dtype=torch.long, device=ast_data.x.device)
+        batch_cfg = torch.zeros(cfg_data.x.size(0), dtype=torch.long, device=cfg_data.x.device)
         cfg_pooled = model.cfg(cfg_data.x, cfg_data.edge_index, batch_cfg)
         ast_pooled = model.ast(ast_data.x, ast_data.edge_index, batch_ast)
 
-    ast_l, ast_un = explain_branch(model, ast_data, cfg_pooled, "ast", class_idx, ast_lines, k, epochs)
-    cfg_l, cfg_un = explain_branch(model, cfg_data, ast_pooled, "cfg", class_idx, cfg_lines, k, epochs)
-    return rank_unique(ast_l + cfg_l), (ast_un + cfg_un)
+    ast_scores, ast_un = _branch_line_scores(
+        model, ast_data, cfg_pooled, "ast", class_idx, ast_lines, epochs)
+    cfg_scores, cfg_un = _branch_line_scores(
+        model, cfg_data, ast_pooled, "cfg", class_idx, cfg_lines, epochs)
+    lines = merge_line_scores(ast_scores, cfg_scores, k=k)
+    return lines, (ast_un + cfg_un)

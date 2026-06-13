@@ -56,8 +56,17 @@ Every analysis returns the following shape (defined once in `scgnn/schema.py`):
 }
 ```
 
-The five flaw types are fixed and DASP-aligned: `reentrancy`, `access_control`,
-`arithmetic`, `unchecked_calls`, `dos`.
+The five flaw types are fixed and DASP-aligned. The stable code label (used in
+the API, the label columns and the model's output order) and the report name
+(the proposal's wording) for each are:
+
+| Code label | Report name | DASP |
+|------------|-------------|------|
+| `reentrancy` | Reentrancy | 1 |
+| `access_control` | Access Control | 2 |
+| `arithmetic` | Integer Overflow/Underflow | 3 |
+| `unchecked_calls` | Unchecked Low-Level Calls | 4 |
+| `dos` | Denial of Service (DoS) | 5 |
 
 ## Status
 
