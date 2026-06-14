@@ -16,6 +16,7 @@ SLITHER_MAP: dict[str, str] = {
     "reentrancy-no-eth": "reentrancy",
     "reentrancy-benign": "reentrancy",
     "reentrancy-events": "reentrancy",
+    "reentrancy-unlimited-gas": "reentrancy",
     "arbitrary-send": "access_control",
     "arbitrary-send-eth": "access_control",
     "suicidal": "access_control",
@@ -25,6 +26,7 @@ SLITHER_MAP: dict[str, str] = {
     "unchecked-send": "unchecked_calls",
     "unchecked-transfer": "unchecked_calls",
     "calls-loop": "dos",
+    "locked-ether": "dos",
     # arithmetic: Slither defers to the solc version (no dedicated detector since
     # 0.8 checks overflow); arithmetic votes come mainly from Mythril/Securify.
 }
@@ -35,6 +37,8 @@ MYTHRIL_SWC: dict[str, str] = {
     "SWC-105": "access_control",
     "SWC-106": "access_control",
     "SWC-115": "access_control",   # tx.origin authorisation
+    "SWC-112": "access_control",   # delegatecall to untrusted callee
+    "SWC-124": "access_control",   # write to arbitrary storage location
     "SWC-101": "arithmetic",
     "SWC-104": "unchecked_calls",
     "SWC-113": "dos",
@@ -54,10 +58,24 @@ SECURIFY_MAP: dict[str, str] = {
     "LockedEther": "dos",
 }
 
+# Osiris finding names -> flaw code. Osiris is the integer-bug specialist that
+# fills the arithmetic gap none of Slither/Mythril/Securify cover. Names are the
+# plain-English categories Osiris reports (validated on the curated arithmetic set).
+OSIRIS_MAP: dict[str, str] = {
+    "Overflow bugs": "arithmetic",
+    "Underflow bugs": "arithmetic",
+    "Division bugs": "arithmetic",
+    "Modulo bugs": "arithmetic",
+    "Truncation bugs": "arithmetic",
+    "Signedness bugs": "arithmetic",
+    # "Time dependency bug" is timestamp-dependence, out of the five -> unmapped.
+}
+
 TOOL_MAPS: dict[str, dict[str, str]] = {
     "slither": SLITHER_MAP,
     "mythril": MYTHRIL_SWC,
     "securify": SECURIFY_MAP,
+    "osiris": OSIRIS_MAP,
 }
 
 

@@ -13,6 +13,8 @@ def main() -> int:
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--config", required=True)
     ap.add_argument("--feature-config", default="data/processed/feature_config.json")
+    ap.add_argument("--out", default="data/processed",
+                    help="Where to write eval_metrics.json for reporting/figures.")
     args = ap.parse_args()
 
     import numpy as np
@@ -40,7 +42,13 @@ def main() -> int:
             ps.append(torch.sigmoid(model(ast, cfg)).numpy()); ys.append(y.numpy())
     y_true = (np.vstack(ys) >= 0.5).astype(int)
     y_pred = (np.vstack(ps) >= 0.5).astype(int)
-    print(json.dumps(per_flaw_and_macro(y_true, y_pred), indent=2))
+    metrics = per_flaw_and_macro(y_true, y_pred)
+    print(json.dumps(metrics, indent=2))
+
+    from pathlib import Path
+    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+    (out / "eval_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    print(f"wrote {out / 'eval_metrics.json'}")
     return 0
 
 

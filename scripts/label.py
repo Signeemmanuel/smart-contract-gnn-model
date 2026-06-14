@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
 from pathlib import Path
 
 from scgnn.common.seeds import set_seed
 from scgnn.schema import FLAWS
-from training.labelling.run_tools import build_label_matrices, parse_smartbugs_result
+from training.labelling.run_tools import build_label_matrices, collect_votes
 from training.labelling.snorkel_label import label_all
 
 
@@ -30,13 +29,20 @@ def main() -> int:
     args = ap.parse_args()
     set_seed(args.seed)
 
-    votes: dict[str, dict[str, set[str]]] = defaultdict(dict)
-    for path in Path(args.results).rglob("*.json"):
-        contract, tool, flaws = parse_smartbugs_result(path)
-        if tool:
-            votes[contract][tool] = flaws
+    votes = collect_votes(args.results)
     contract_ids = sorted(votes)
     matrices = build_label_matrices(votes, contract_ids)
+
+    # Per-tool, per-flaw vote summary (for reporting/figures): how many contracts
+    # each tool RAN on and how many it flagged POSITIVE for each flaw. This is the
+    # evidence behind the tool-coverage figure (e.g. only Osiris covers arithmetic).
+    from training.labelling.run_tools import TOOLS
+    tool_vote_summary = {
+        t: {flaw: {"positive": int((matrices[flaw][:, j] == 1).sum()),
+                   "ran": int((matrices[flaw][:, j] != -1).sum())}
+            for flaw in FLAWS}
+        for j, t in enumerate(TOOLS)
+    }
 
     Y, P, reliabilities = label_all(matrices, threshold=args.threshold, seed=args.seed)
 
@@ -45,6 +51,7 @@ def main() -> int:
     df = pd.DataFrame(Y, columns=FLAWS); df.insert(0, "contract", contract_ids)
     df.to_parquet(out / "labels.parquet", index=False)
     (out / "reliabilities.json").write_text(json.dumps(reliabilities, indent=2), encoding="utf-8")
+    (out / "tool_vote_summary.json").write_text(json.dumps(tool_vote_summary, indent=2), encoding="utf-8")
     freq = {flaw: int(Y[:, j].sum()) for j, flaw in enumerate(FLAWS)}
     (out / "class_frequency.json").write_text(json.dumps(freq, indent=2), encoding="utf-8")
     print("labelled", len(contract_ids), "contracts; class frequency:", freq)
