@@ -26,14 +26,14 @@ def main() -> int:
     ap.add_argument("--wild-labels", required=True, help="labels.parquet from scripts/label.py.")
     ap.add_argument("--curated-dir", required=True, help="smartbugs-curated checkout root.")
     ap.add_argument("--out", default="data/processed")
-    ap.add_argument("--val-frac", type=float, default=0.2)
+    ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--test-frac", type=float, default=0.3)
     ap.add_argument("--embed-dim", type=int, default=64)
     ap.add_argument("--max-wild", type=int, default=None, help="Cap Wild for a smoke run.")
     ap.add_argument("--extract-timeout", type=float, default=120,
                     help="Per-contract extraction time budget (s); a hung Slither/solc is "
                          "aborted and the contract skipped.")
-    ap.add_argument("--embed-batch", type=int, default=128,
+    ap.add_argument("--embed-batch", type=int, default=256,
                     help="CodeBERT embedding batch size (raise to use more GPU).")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--solc", default=None,

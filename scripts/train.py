@@ -24,9 +24,9 @@ def main() -> int:
     ap.add_argument("--patience", type=int, default=None,
                     help="Override config patience (epochs without val improvement "
                          "before early stop). Raise this to train through plateaus.")
-    ap.add_argument("--num-workers", type=int, default=0,
+    ap.add_argument("--num-workers", type=int, default=20,
                     help="DataLoader worker processes. This workload is CPU/data-bound, "
-                         "so >0 (e.g. 8) speeds up batch building markedly. You have 24 vCPUs.")
+                         "so >0 (e.g. 20) speeds up batch building markedly. You have 24 vCPUs.")
     ap.add_argument("--batch-size", type=int, default=None,
                     help="Override config batch_size. Larger (128/256) feeds the GPU "
                          "more per step; plenty of VRAM headroom here.")

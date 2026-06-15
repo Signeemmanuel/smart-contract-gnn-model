@@ -1,7 +1,8 @@
 # Base experiment config. One file per experiment; log it with every run.
+# Defaults reflect the settled final recipe used for the reported results.
 seed: 42
 device: cuda          # falls back to cpu automatically if unavailable
-threshold: 0.70       # Snorkel positive threshold AND inference flag threshold
+threshold: 0.5        # decision/flag threshold (reported policy; union labelling, not Snorkel)
 conv: sage            # gcn | sage | gat
 hid: 128
 layers: 3
@@ -10,6 +11,6 @@ dropout: 0.5
 n_classes: 5
 lr: 0.001
 weight_decay: 0.00001
-batch_size: 32
-epochs: 200
-patience: 15
+batch_size: 256       # final recipe (was 32 in early smoke runs)
+epochs: 600           # max; early stopping ends well before this
+patience: 50          # epochs without val-macro-F1 improvement before stopping

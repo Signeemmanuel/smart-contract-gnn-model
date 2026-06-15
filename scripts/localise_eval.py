@@ -182,7 +182,7 @@ def main() -> int:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--k", type=int, default=5, help="Lines requested per branch / final.")
     ap.add_argument("--epochs", type=int, default=150, help="GNNExplainer steps per branch.")
-    ap.add_argument("--repeats", type=int, default=1,
+    ap.add_argument("--repeats", type=int, default=5,
                     help="Seeded passes; reports mean +/- std when >1.")
     ap.add_argument("--seed", type=int, default=0, help="Base seed; pass r uses seed+r.")
     ap.add_argument("--merge", choices=["max", "concat", "both"], default="max",

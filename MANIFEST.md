@@ -67,6 +67,11 @@ everything under `training/` is excluded from the wheel (see `pyproject.toml`).
 | `scripts/evaluate.py` | needs-Studio | Score a checkpoint on the frozen Curated test split. |
 | `scripts/explain.py` | needs-Studio | Analyse one `.sol` end to end. |
 | `scripts/build_release_bundle.py` | needs-Studio | Assemble a Hub bundle from a finished run. |
+| `scripts/make_figures.py` | needs-Studio | Render per-model report figures (PNG+PDF) + caption sheet. |
+| `scripts/make_comparison_figure.py` | needs-Studio | Three-model detection comparison chart + CSV. |
+| `scripts/localise_eval.py` | needs-Studio | Top-k localisation: GNNExplainer or GAT attention, with line tolerance. |
+| `run_pipeline.sh` | config/doc | End-to-end orchestration: install → release, stage by stage. |
+| `setup_gpu01.sh` | config/doc | One-shot gpu-01 environment install (preserves working torch). |
 
 ## Configs, tests, project files
 
@@ -87,8 +92,10 @@ everything under `training/` is excluded from the wheel (see `pyproject.toml`).
 
 ## Verification run
 
-`PYTHONPATH=. python -m pytest -q` → **25 passed**. All other modules byte-compile
-cleanly (`python -m compileall scgnn training scripts tests`).
+`PYTHONPATH=. python -m pytest -q` → **81 passed** (after the four-tool labelling,
+union labelling, coverage-aware abstention, threshold-tuning, tolerance and
+attention-localisation additions). All other modules byte-compile cleanly
+(`python -m compileall scgnn training scripts tests`).
 
 ## First things to run on the Studio
 
