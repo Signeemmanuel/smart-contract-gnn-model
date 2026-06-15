@@ -100,10 +100,10 @@ def test_collect_votes_reads_result_json_by_path(tmp_path):
         {"name": "x", "swc-id": "107"}, {"name": "y", "swc-id": "104"}]}), encoding="utf-8")
 
     votes = collect_votes(tmp_path)
-    assert votes["simple_dao.sol"]["slither"] == {"reentrancy"}
-    assert votes["simple_dao.sol"]["mythril"] == {"reentrancy", "unchecked_calls"}
+    assert votes["simple_dao"]["slither"] == {"reentrancy"}
+    assert votes["simple_dao"]["mythril"] == {"reentrancy", "unchecked_calls"}
 
-    mats = build_label_matrices(votes, ["simple_dao.sol"])
+    mats = build_label_matrices(votes, ["simple_dao"])
     # TOOLS = [slither, mythril, securify, osiris]; securify+osiris absent -> abstain (-1)
     assert mats["reentrancy"][0].tolist() == [1, 1, -1, -1]
     assert mats["unchecked_calls"][0].tolist() == [0, 1, -1, -1]

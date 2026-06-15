@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from scgnn.schema import FLAW_INDEX, FLAWS  # noqa: F401  (FLAW_INDEX re-exported)
-from training.labelling.map_dasp import TOOL_MAPS, map_finding  # noqa: F401
+from training.labelling.map_dasp import TOOL_COVERAGE, TOOL_MAPS, map_finding  # noqa: F401
 
 ABSTAIN = -1
 TOOLS = ["slither", "mythril", "securify", "osiris"]
@@ -119,7 +119,7 @@ def collect_votes(results_dir: str | Path) -> dict[str, dict[str, set[str]]]:
     votes: dict[str, dict[str, set[str]]] = {}
     root = Path(results_dir)
     for pj in root.rglob(PARSER_OUTPUT):
-        contract = pj.parent.name                                   # <contract>
+        contract = Path(pj.parent.name).stem                        # <contract> dir -> stem (drop .sol)
         tool = pj.parent.parent.parent.name.split("-")[0].lower()   # <tool-id> -> tool
         try:
             data = json.loads(pj.read_text(encoding="utf-8"))
@@ -172,7 +172,10 @@ def build_label_matrices(
         for j, tool in enumerate(TOOLS):
             reported = per_tool.get(tool)
             if reported is None:
-                continue  # abstain stays -1
+                continue  # tool didn't run -> abstain (-1)
+            covers = TOOL_COVERAGE.get(tool, set())
             for flaw in FLAWS:
+                if flaw not in covers:
+                    continue  # tool is not a detector for this flaw -> abstain (-1)
                 mats[flaw][i, j] = 1 if flaw in reported else 0
     return mats

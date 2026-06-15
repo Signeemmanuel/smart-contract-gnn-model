@@ -78,6 +78,22 @@ TOOL_MAPS: dict[str, dict[str, str]] = {
     "osiris": OSIRIS_MAP,
 }
 
+# What each tool is RELIED UPON to detect — its abstention mask during labelling.
+# A tool ABSTAINS (-1) on any flaw outside its coverage rather than voting
+# "absent" (0): a static/symbolic analyser's silence on a class it cannot detect
+# is absence of evidence, not evidence of absence. Without this, the three tools
+# that have no arithmetic detector would each vote "no arithmetic" on every
+# contract and bury Osiris — the one tool that finds it. Coverage is declared
+# explicitly (not derived from the maps) because Mythril nominally maps an
+# overflow SWC but does not reliably emit it on real corpora; Osiris is the
+# designated arithmetic detector, validated on the Curated arithmetic set.
+TOOL_COVERAGE: dict[str, set[str]] = {
+    "slither": {"reentrancy", "access_control", "unchecked_calls", "dos"},
+    "mythril": {"reentrancy", "access_control", "unchecked_calls", "dos"},
+    "securify": {"reentrancy", "access_control", "unchecked_calls", "dos"},
+    "osiris": {"arithmetic"},
+}
+
 
 def map_finding(tool: str, identifier: str) -> str | None:
     """Return the flaw code for a tool's finding id, or ``None`` if unmapped."""

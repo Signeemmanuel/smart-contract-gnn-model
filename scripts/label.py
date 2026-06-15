@@ -24,6 +24,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results", required=True, help="SmartBugs results directory.")
     ap.add_argument("--out", default="data/processed", help="Output directory.")
+    ap.add_argument("--method", default="union", choices=["union", "snorkel"],
+                    help="union (default; robust to low tool overlap) or snorkel "
+                         "(LabelModel posterior; collapses on low-overlap classes).")
     ap.add_argument("--threshold", type=float, default=0.70)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -44,7 +47,8 @@ def main() -> int:
         for j, t in enumerate(TOOLS)
     }
 
-    Y, P, reliabilities = label_all(matrices, threshold=args.threshold, seed=args.seed)
+    Y, P, reliabilities = label_all(matrices, threshold=args.threshold, seed=args.seed,
+                                    method=args.method)
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     import pandas as pd
@@ -54,7 +58,9 @@ def main() -> int:
     (out / "tool_vote_summary.json").write_text(json.dumps(tool_vote_summary, indent=2), encoding="utf-8")
     freq = {flaw: int(Y[:, j].sum()) for j, flaw in enumerate(FLAWS)}
     (out / "class_frequency.json").write_text(json.dumps(freq, indent=2), encoding="utf-8")
-    print("labelled", len(contract_ids), "contracts; class frequency:", freq)
+    (out / "labelling_method.json").write_text(
+        json.dumps({"method": args.method, "threshold": args.threshold}, indent=2), encoding="utf-8")
+    print(f"labelled {len(contract_ids)} contracts via '{args.method}'; class frequency:", freq)
     return 0
 
 

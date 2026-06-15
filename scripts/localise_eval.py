@@ -2,25 +2,33 @@
 """Top-k line-localisation accuracy over the frozen Curated test split.
 
 For every test contract that carries expert gold lines, this runs the real
-`explain_lines` for the flaw(s) the contract is annotated with, then scores the
+explainer for the flaw(s) the contract is annotated with, then scores the
 ranked predicted lines against the gold lines with the proposal's metric:
 
     accuracy@k = fraction of flawed contracts whose top-k predicted lines
                  include at least one expert-marked line.
 
-GNNExplainer is stochastic (random mask initialisation), so a single run is not
-reproducible by default. This script seeds every run, making one pass
-deterministic, and `--repeats N` runs N seeded passes (pass r uses seed+r) and
-reports `mean ± std` — the figure to cite. It reuses the build caches
-(`records/<hash>.pt`, `raw/<hash>.json`); nothing is re-extracted or re-embedded.
-Explanation runs on CPU by default (matches the API, and is reproducible).
+GNNExplainer is stochastic (random mask initialisation), so every run is seeded
+(pass r uses seed+r) and `--repeats N` reports `mean +/- std` — the figure to
+cite. `--merge` selects how the two branches' line scores are combined:
 
-Example (single reproducible run):
+    max     line takes its best score across branches, ranked globally (default)
+    concat  every AST line before any CFG line (the pre-fix behaviour)
+    both    run a paired ablation: one explainer run per contract feeds BOTH
+            rules, so the arms differ only in the combination, never in the
+            importances — the honest before/after.
+
+Reuses the build caches (`records/<hash>.pt`, `raw/<hash>.json`); nothing is
+re-extracted or re-embedded. Explanation runs on CPU by default (matches the
+API, and is reproducible).
+
+Examples:
+    # single reproducible run, merge-max
     PYTHONPATH=. python scripts/localise_eval.py \
         --checkpoint runs/sage/best_model.pt --config configs/sage.yaml
 
-Example (citable mean ± std over 5 seeded runs):
-    PYTHONPATH=. python scripts/localise_eval.py --repeats 5 \
+    # paired merge-vs-concat ablation, mean +/- std over 5 seeds
+    PYTHONPATH=. python scripts/localise_eval.py --merge both --repeats 5 \
         --checkpoint runs/sage/best_model.pt --config configs/sage.yaml
 """
 
@@ -59,22 +67,31 @@ def _seed_everything(seed: int) -> None:
 
 
 def _run_pass(model, targets, gold_map, processed: Path, device: str,
-              k: int, epochs: int, verbose: bool):
-    """One full pass over all localisation targets. Returns per-contract rows."""
+              k: int, epochs: int, modes: list[str], verbose: bool, tol: int = 0,
+              method: str = "gnnexplainer"):
+    """One pass over all targets. Returns ``{mode: rows}``.
+
+    The explainer runs ONCE per contract per flaw; every requested combination
+    rule is applied to that single run's scores, so the arms are perfectly
+    paired and `both` costs the same as one arm.
+    """
     import torch
     from torch_geometric.data import Data
 
-    from scgnn.explain.explainer import explain_lines
+    from scgnn.explain.explainer import explain_line_scores
+    from scgnn.explain.attention import attention_lines
+    from scgnn.explain.localise import concat_line_scores, merge_line_scores
     from scgnn.extraction.graph_types import RawGraph
     from scgnn.schema import FLAWS, display_name
 
-    rows: list[dict] = []
+    combine = {"max": merge_line_scores, "concat": concat_line_scores}
+    out: dict[str, list[dict]] = {m: [] for m in modes}
+    primary = "max" if "max" in modes else modes[-1]
     total = len(targets)
+
     for n, entry in enumerate(targets, 1):
         cid = entry["id"]
         gold = sorted(set(gold_map[cid]))
-        # filename stem is the content hash, shared by records/ and raw/;
-        # rebuild from --processed so a path-prefix mismatch can't drop a contract
         h = Path(entry["path"]).stem
         rec_path = processed / "records" / f"{h}.pt"
         rawj = processed / "raw" / f"{h}.json"
@@ -93,30 +110,64 @@ def _run_pass(model, targets, gold_map, processed: Path, device: str,
         if not positive:
             continue
 
-        merged: list[int] = []
-        for j in positive:
-            lines, _unmapped = explain_lines(
-                model, ast_data, cfg_data, j,
-                ast_raw.node_lines, cfg_raw.node_lines, k=k, epochs=epochs,
-            )
-            merged.extend(lines)
-        pred = _dedup_keep_order(merged)
-        rows.append({"id": cid, "flaws": [FLAWS[j] for j in positive],
-                     "gold": gold, "pred": pred})
+        merged: dict[str, list[int]] = {m: [] for m in modes}
+        if method == "attention":
+            # One forward pass populates each GAT encoder's last_attention; the
+            # proposal's secondary signal. Branch lines are merged like the
+            # explainer's, so the same merge modes and metric apply.
+            with torch.no_grad():
+                model(ast_data, cfg_data)
+            ast_lines, _ua = attention_lines(model.ast, ast_raw.node_lines, k=k)
+            cfg_lines, _uc = attention_lines(model.cfg, cfg_raw.node_lines, k=k)
+            for m in modes:
+                if m == "concat":
+                    merged[m].extend((ast_lines + cfg_lines)[: 2 * k])
+                else:  # max: interleave, AST first
+                    inter = [x for pair in zip(ast_lines, cfg_lines) for x in pair]
+                    inter += ast_lines[len(cfg_lines):] + cfg_lines[len(ast_lines):]
+                    merged[m].extend(inter[: 2 * k])
+        else:
+            for j in positive:
+                ast_s, cfg_s, _unmapped = explain_line_scores(
+                    model, ast_data, cfg_data, j,
+                    ast_raw.node_lines, cfg_raw.node_lines, epochs=epochs)
+                for m in modes:
+                    merged[m].extend(combine[m](ast_s, cfg_s, k=k))
+
+        flaws = [FLAWS[j] for j in positive]
+        for m in modes:
+            out[m].append({"id": cid, "flaws": flaws, "gold": gold,
+                           "pred": _dedup_keep_order(merged[m])})
         if verbose:
-            hit = "\u2713" if set(pred[:k]) & set(gold) else "\u00b7"
-            flaws = "/".join(display_name(FLAWS[j]) for j in positive)
-            print(f"  [{n}/{total}] {hit} {cid} [{flaws}]  gold={gold}  "
-                  f"pred@{k}={pred[:k]}", flush=True)
-    return rows
+            pred = out[primary][-1]["pred"]
+            mark = "\u2713" if set(pred[:k]) & _expand(set(gold), tol) else "\u00b7"
+            fl = "/".join(display_name(f) for f in flaws)
+            tag = f" [{primary}]" if len(modes) > 1 else ""
+            print(f"  [{n}/{total}] {mark} {cid} [{fl}]  gold={gold}  "
+                  f"pred@{k}{tag}={pred[:k]}", flush=True)
+    return out
 
 
-def _accuracy(rows: list[dict], ks=KS) -> dict[int, float]:
-    """Accuracy@k via the canonical metric, to avoid a second definition."""
+def _expand(gold: set[int], tol: int) -> set[int]:
+    """Widen each gold line into a +/-tol window. tol=0 is exact match."""
+    if tol <= 0:
+        return set(gold)
+    out: set[int] = set()
+    for g in gold:
+        out.update(range(g - tol, g + tol + 1))
+    return out
+
+
+def _accuracy(rows: list[dict], ks=KS, tol: int = 0) -> dict[int, float]:
+    """Accuracy@k via the canonical metric, to avoid a second definition.
+
+    A predicted line counts as a hit if it lies within +/-tol of any gold line,
+    implemented by widening the gold set before scoring (tol=0 == exact match).
+    """
     from training.evaluate.localisation import top_k_localisation
 
     pred_lines = [r["pred"] for r in rows]
-    gold_lines = [set(r["gold"]) for r in rows]
+    gold_lines = [_expand(set(r["gold"]), tol) for r in rows]
     return top_k_localisation(pred_lines, gold_lines, ks=ks)
 
 
@@ -134,8 +185,19 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=1,
                     help="Seeded passes; reports mean +/- std when >1.")
     ap.add_argument("--seed", type=int, default=0, help="Base seed; pass r uses seed+r.")
+    ap.add_argument("--merge", choices=["max", "concat", "both"], default="max",
+                    help="Branch combination rule, or 'both' for a paired ablation.")
+    ap.add_argument("--method", choices=["gnnexplainer", "attention"], default="gnnexplainer",
+                    help="Localisation method. 'gnnexplainer' (default) runs GNNExplainer "
+                         "per flaw on any model. 'attention' reads the GAT first-layer "
+                         "attention weights (requires a GAT checkpoint) as the proposal's "
+                         "secondary explanation signal.")
+    ap.add_argument("--tolerance", type=int, default=0,
+                    help="Line tolerance: a prediction within +/-tolerance of a gold "
+                         "line counts as a hit. 0 (default) = exact match. Try 1 or 2 "
+                         "to report neighbourhood localisation alongside exact.")
     ap.add_argument("--out", default=None,
-                    help="Defaults to <processed>/localisation_report.json")
+                    help="Defaults to <processed>/localisation_report_<merge>.json")
     args = ap.parse_args()
 
     import torch
@@ -155,18 +217,25 @@ def main() -> int:
     model.to(args.device).eval()
     print(f"loaded {config.get('conv')} model (in_dim={feat_cfg.in_dim}) on {args.device}")
 
+    if args.method == "attention" and config.get("conv") != "gat":
+        raise SystemExit(
+            f"--method attention requires a GAT checkpoint, but this model is "
+            f"'{config.get('conv')}'. Attention weights exist only in GAT. Point "
+            f"--checkpoint/--config at the GAT run (runs/gat_multitool).")
+
     test_index = json.loads((processed / "test_index.json").read_text(encoding="utf-8"))
     gold_map = json.loads((processed / "curated_gold_lines.json").read_text(encoding="utf-8"))
     targets = [e for e in test_index if gold_map.get(e["id"])]
+    modes = ["concat", "max"] if args.merge == "both" else [args.merge]
     print(f"{len(test_index)} test contracts; {len(targets)} carry gold lines "
           f"(localisation targets)")
-    print(f"{args.repeats} seeded pass(es), base seed {args.seed}, "
+    print(f"merge={args.merge}  {args.repeats} seeded pass(es), base seed {args.seed}, "
           f"{args.epochs} explainer epochs\n")
 
-    acc_samples: dict[int, list[float]] = {k: [] for k in KS}
-    hit_counts: dict[str, dict[int, int]] = {}
+    acc_samples = {m: {k: [] for k in KS} for m in modes}
+    hit_counts = {m: {} for m in modes}
+    example = {m: None for m in modes}
     per_pass: list[dict] = []
-    example_rows: list[dict] | None = None
 
     for r in range(args.repeats):
         seed = args.seed + r
@@ -174,57 +243,84 @@ def main() -> int:
         verbose = (r == 0)
         if args.repeats > 1 and verbose:
             print(f"--- pass 1/{args.repeats} (seed={seed}); per-contract detail ---")
-        rows = _run_pass(model, targets, gold_map, processed, args.device,
-                         args.k, args.epochs, verbose)
-        acc = _accuracy(rows)
+        out = _run_pass(model, targets, gold_map, processed, args.device,
+                        args.k, args.epochs, modes, verbose, tol=args.tolerance,
+                        method=args.method)
+        accs = {m: _accuracy(out[m], tol=args.tolerance) for m in modes}
         per_pass.append({"seed": seed,
-                         "accuracy_at_k": {str(k): round(acc[k], 4) for k in KS}})
-        for k in KS:
-            acc_samples[k].append(acc[k])
-        for row in rows:
-            hc = hit_counts.setdefault(row["id"], {k: 0 for k in KS})
+                         "accuracy_at_k": {m: {str(k): round(accs[m][k], 4) for k in KS}
+                                           for m in modes}})
+        for m in modes:
             for k in KS:
-                if set(row["pred"][:k]) & set(row["gold"]):
-                    hc[k] += 1
-        if example_rows is None:
-            example_rows = rows
-        print(f"pass {r + 1}/{args.repeats} (seed={seed}): "
-              f"@1={acc[1]:.3f}  @3={acc[3]:.3f}  @5={acc[5]:.3f}", flush=True)
+                acc_samples[m][k].append(accs[m][k])
+            for row in out[m]:
+                hc = hit_counts[m].setdefault(row["id"], {k: 0 for k in KS})
+                gold_win = _expand(set(row["gold"]), args.tolerance)
+                for k in KS:
+                    if set(row["pred"][:k]) & gold_win:
+                        hc[k] += 1
+            if example[m] is None:
+                example[m] = out[m]
+        summary = "  |  ".join(
+            f"{m}: @1={accs[m][1]:.3f} @3={accs[m][3]:.3f} @5={accs[m][5]:.3f}"
+            for m in modes)
+        print(f"pass {r + 1}/{args.repeats} (seed={seed}):  {summary}", flush=True)
 
-    n = len(example_rows) if example_rows else 0
-    mean = {k: statistics.mean(acc_samples[k]) for k in KS}
-    std = {k: (statistics.stdev(acc_samples[k]) if args.repeats > 1 else 0.0) for k in KS}
+    n = len(example[modes[0]]) if example[modes[0]] else 0
+    mean = {m: {k: statistics.mean(acc_samples[m][k]) for k in KS} for m in modes}
+    std = {m: {k: (statistics.stdev(acc_samples[m][k]) if args.repeats > 1 else 0.0)
+               for k in KS} for m in modes}
 
-    print("\n=== localisation accuracy (Curated test split) ===")
-    if args.repeats > 1:
-        for k in KS:
-            print(f"  accuracy@{k}: {mean[k]:.3f} \u00b1 {std[k]:.3f}   "
-                  f"(mean of {args.repeats} seeded runs)")
+    print("\n=== localisation accuracy (Curated test split, n="
+          f"{n}) ===")
+    if args.merge == "both":
+        print(f"  {'merge':<8}{'@1':<16}{'@3':<16}{'@5':<16}")
+        for m in modes:
+            cells = "".join(f"{mean[m][k]:.3f} \u00b1 {std[m][k]:.3f}   " for k in KS)
+            print(f"  {m:<8}{cells}")
+        dl = {k: mean['max'][k] - mean['concat'][k] for k in KS}
+        delta_label = "\u0394(max-concat)"
+        print(f"  {delta_label}:  @1={dl[1]:+.3f}  @3={dl[3]:+.3f}  @5={dl[5]:+.3f}")
     else:
+        m = modes[0]
         for k in KS:
-            print(f"  accuracy@{k}: {mean[k]:.3f}   ({round(mean[k] * n)}/{n})")
+            if args.repeats > 1:
+                print(f"  accuracy@{k}: {mean[m][k]:.3f} \u00b1 {std[m][k]:.3f}   "
+                      f"(mean of {args.repeats} seeded runs)")
+            else:
+                print(f"  accuracy@{k}: {mean[m][k]:.3f}   ({round(mean[m][k] * n)}/{n})")
 
     per_contract = []
-    for row in example_rows or []:
-        hc = hit_counts[row["id"]]
-        per_contract.append({
-            "id": row["id"], "flaws": row["flaws"], "gold": row["gold"],
-            "hit_at_k_over_runs": {str(k): hc[k] for k in KS},
-            "example_pred": row["pred"][:args.k],
-        })
+    base_rows = example[modes[0]] or []
+    by_id = {m: {r["id"]: r for r in (example[m] or [])} for m in modes}
+    for row in base_rows:
+        cid = row["id"]
+        entry = {"id": cid, "flaws": row["flaws"], "gold": row["gold"]}
+        for m in modes:
+            entry[f"hit_at_k_over_runs__{m}"] = {str(k): hit_counts[m][cid][k] for k in KS}
+            entry[f"example_pred__{m}"] = by_id[m][cid]["pred"][:args.k]
+        per_contract.append(entry)
 
     report = {
         "n_localisation_targets": n,
         "repeats": args.repeats,
         "base_seed": args.seed,
         "epochs": args.epochs,
+        "tolerance": args.tolerance,
+        "method": args.method,
         "device": args.device,
-        "accuracy_at_k_mean": {str(k): round(mean[k], 4) for k in KS},
-        "accuracy_at_k_std": {str(k): round(std[k], 4) for k in KS},
+        "merge_modes": modes,
+        "results": {m: {"accuracy_at_k_mean": {str(k): round(mean[m][k], 4) for k in KS},
+                        "accuracy_at_k_std": {str(k): round(std[m][k], 4) for k in KS}}
+                    for m in modes},
         "passes": per_pass,
         "per_contract": per_contract,
     }
-    outp = args.out or str(processed / "localisation_report.json")
+    if args.merge == "both":
+        report["delta_max_minus_concat"] = {
+            str(k): round(mean["max"][k] - mean["concat"][k], 4) for k in KS}
+    suffix = args.merge if args.method == "gnnexplainer" else f"{args.method}_{args.merge}"
+    outp = args.out or str(processed / f"localisation_report_{suffix}.json")
     Path(outp).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print("\nwrote", outp)
     return 0
