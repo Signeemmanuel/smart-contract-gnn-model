@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 from scgnn.schema import FLAW_INDEX, N_FLAWS
+from training.data.firewall import content_hash
 
 # SmartBugs Curated category folder -> our flaw code. Folders outside our five
 # (bad_randomness, front_running, time_manipulation, short_addresses, other)
@@ -25,6 +26,20 @@ CATEGORY_MAP: dict[str, str] = {
     "unchecked_low_level_calls": "unchecked_calls",
     "denial_of_service": "dos",
 }
+
+
+def content_hash_of_file(path: str | Path) -> str:
+    """Whitespace-normalised content hash of a contract file.
+
+    Thin wrapper over :func:`training.data.firewall.content_hash` so that SWC<->
+    Curated de-duplication in build_dataset.py uses the *same* hash as the
+    train/test firewall — one definition of "identical contract" everywhere.
+    Returns a sentinel for unreadable files so they are never treated as a match.
+    """
+    try:
+        return content_hash(Path(path).read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return f"__unreadable__:{path}"
 
 
 def _entry_fields(entry: dict) -> tuple[str, list[int]]:

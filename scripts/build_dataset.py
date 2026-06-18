@@ -4,11 +4,23 @@
 Status: needs solc/Slither + CodeBERT + torch; run on the Studio. The split
 planning is unit-tested; this wires it to the real extractor and embedder.
 
+Training data is supplied via ``--wild-dir`` + ``--wild-labels`` (now DIVE: see
+scripts/prepare_dive.py). The expert TEST pool is ``--curated-dir`` (SmartBugs
+Curated) optionally augmented with extra expert sources in the same folder/
+annotation format:
+  * ``--bit-dir``  : the BIT smartcontract-benchmark (recommended; line-annotated,
+                     adds real per-class test support incl. dos via gasless_send)
+  * ``--swc-dir``  : an SWC-registry checkout with test_cases/<id>/*.sol (older
+                     layout; the current SWC repo no longer ships .sol files)
+All extra sources are de-duplicated against Curated (and each other) by content
+hash, then flow into the same frozen, stratified, firewalled test split.
+
 Example:
     PYTHONPATH=. python scripts/build_dataset.py \
-        --wild-dir data/raw/wild --wild-labels data/processed/labels.parquet \
-        --curated-dir data/raw/curated --out data/processed \
-        --max-wild 500          # cap Wild for a fast end-to-end smoke run first
+        --wild-dir data/raw/dive_sources --wild-labels data/processed/dive_labels.parquet \
+        --curated-dir data/raw/curated \
+        --bit-dir data/raw/bit-benchmark \
+        --out data/processed
 """
 
 from __future__ import annotations
@@ -20,11 +32,39 @@ from scgnn.common.seeds import set_seed
 from scgnn.schema import FLAWS
 
 
+def _merge_extra_test(curated: dict, recs: dict, source_name: str,
+                      content_hash_of_file) -> None:
+    """Merge extra expert test contracts into ``curated`` in place, de-duplicated.
+
+    Drops any contract whose content hash already appears in the pool (Curated or
+    a previously-merged source) or whose cid collides. Prints a one-line summary.
+    """
+    pool_hashes = {content_hash_of_file(v["path"]) for v in curated.values()}
+    added = dropped = 0
+    for cid, rec in recs.items():
+        h = content_hash_of_file(rec["path"])
+        if h in pool_hashes or cid in curated:
+            dropped += 1
+            continue
+        curated[cid] = rec
+        pool_hashes.add(h)
+        added += 1
+    print(f"{source_name} merge: +{added} test contracts, {dropped} dropped as duplicates")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--wild-dir", required=True, help="Root of Wild .sol files.")
-    ap.add_argument("--wild-labels", required=True, help="labels.parquet from scripts/label.py.")
+    ap.add_argument("--wild-dir", required=True, help="Root of Wild/DIVE .sol files.")
+    ap.add_argument("--wild-labels", required=True, help="labels.parquet (label.py or prepare_dive.py).")
     ap.add_argument("--curated-dir", required=True, help="smartbugs-curated checkout root.")
+    ap.add_argument("--bit-dir", default=None,
+                    help="Optional BIT smartcontract-benchmark checkout; its labelled "
+                         "contracts are merged into the expert TEST pool (de-duplicated).")
+    ap.add_argument("--swc-dir", default=None,
+                    help="Optional SWC-registry checkout (older test_cases/<id>/*.sol "
+                         "layout) merged into the expert TEST pool (de-duplicated).")
+    ap.add_argument("--bit-no-safe", action="store_true",
+                    help="Exclude BIT's explicit safe-contract negatives.")
     ap.add_argument("--out", default="data/processed")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--test-frac", type=float, default=0.3)
@@ -67,14 +107,29 @@ def main() -> int:
     elif args.solc is None:
         print("solc binaries by minor:", {k: Path(v).name for k, v in binaries.items()})
         print("exact solc versions available:", sorted(full_binaries))
-    from training.data.curated import load_curated
+
+    from training.data.curated import content_hash_of_file, load_curated
 
     wild_paths = {p.stem: str(p) for p in Path(args.wild_dir).rglob("*.sol")}
     df = pd.read_parquet(args.wild_labels)
     wild_labels = {str(r["contract"]): [int(r[f]) for f in FLAWS] for _, r in df.iterrows()}
     curated = load_curated(args.curated_dir)
+
+    # Merge extra expert sources into the TEST pool (same {cid:{path,y,lines}} shape).
+    if args.bit_dir:
+        from training.data.bit import load_bit
+        bit = load_bit(args.bit_dir, include_safe=not args.bit_no_safe)
+        _merge_extra_test(curated, bit, "BIT", content_hash_of_file)
+    if args.swc_dir:
+        from training.data.swc import load_swc
+        swc = load_swc(args.swc_dir)
+        _merge_extra_test(curated, swc, "SWC", content_hash_of_file)
+
+    # Report the test-pool composition by class, so you can see dos is now covered.
+    pool_counts = {f: sum(rec["y"][i] for rec in curated.values()) for i, f in enumerate(FLAWS)}
     print(f"wild={len(wild_paths)} contracts, labelled={len(wild_labels)}, "
-          f"curated={len(curated)}")
+          f"test-pool={len(curated)} (pre-split)")
+    print("test-pool positives by class (pre-split):", pool_counts)
 
     plan = plan_splits(wild_paths, wild_labels, curated, val_frac=args.val_frac,
                        test_frac=args.test_frac, seed=args.seed, max_wild=args.max_wild)
