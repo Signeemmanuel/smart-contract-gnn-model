@@ -67,7 +67,11 @@ def main() -> int:
                     help="Exclude BIT's explicit safe-contract negatives.")
     ap.add_argument("--out", default="data/processed")
     ap.add_argument("--val-frac", type=float, default=0.1)
-    ap.add_argument("--test-frac", type=float, default=0.3)
+    ap.add_argument("--expert-train-frac", type=float, default=0.0,
+                    help="Fraction of the expert pool (Curated+BIT) to hold back for "
+                         "TRAIN; default 0.0 sends the whole expert pool to TEST, where "
+                         "its gold labels give credible per-class metrics. Raise only if "
+                         "you deliberately want some expert contracts in training.")
     ap.add_argument("--embed-dim", type=int, default=64)
     ap.add_argument("--max-wild", type=int, default=None, help="Cap Wild for a smoke run.")
     ap.add_argument("--extract-timeout", type=float, default=120,
@@ -131,8 +135,12 @@ def main() -> int:
           f"test-pool={len(curated)} (pre-split)")
     print("test-pool positives by class (pre-split):", pool_counts)
 
+    # NOTE: we deliberately do NOT pass test_frac here. The expert pool (Curated +
+    # BIT) now defaults to TEST inside plan_splits (expert_train_frac=0.0); passing
+    # test_frac would override that and revert to the old train-heavy split.
     plan = plan_splits(wild_paths, wild_labels, curated, val_frac=args.val_frac,
-                       test_frac=args.test_frac, seed=args.seed, max_wild=args.max_wild)
+                       expert_train_frac=args.expert_train_frac,
+                       seed=args.seed, max_wild=args.max_wild)
     print("split plan:", plan.counts)
 
     embedder = CodeBERTEmbedder(device=args.device)

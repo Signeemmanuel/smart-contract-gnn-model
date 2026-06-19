@@ -94,23 +94,52 @@ def _read(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
-def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
-                curated: dict[str, dict], *, val_frac: float = 0.2,
-                test_frac: float = 0.3, seed: int = 42,
-                max_wild: int | None = None) -> SplitPlan:
-    """Assign every contract to train/val/test, with de-dup + firewall. Pure.
 
+def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
+                curated: dict[str, dict], *, val_frac: float = 0.1,
+                expert_train_frac: float = 0.0, seed: int = 42,
+                max_wild: int | None = None,
+                test_frac: float | None = None) -> SplitPlan:
+    """Assign every contract to train/val/test, with de-dup + firewall. Pure.
+ 
+    Data policy (deployed/headline arrangement):
+      * TRAIN  = DIVE/Wild (auto-labelled, abundant) + an optional small slice of
+                 the expert pool (``expert_train_frac``, default 0.0 = none);
+      * VAL    = a held-out slice of DIVE/Wild, for early stopping/threshold tuning;
+      * TEST   = the expert pool (Curated + BIT), which carries gold-quality labels
+                 and line annotations — kept whole for credible per-class metrics.
+ 
+    The expert pool defaults ENTIRELY to test because the training signal comes
+    from DIVE; spending scarce expert positives (esp. dos) on train would starve
+    the test set of exactly the rare classes we need to measure. Set
+    ``expert_train_frac`` > 0 only if you deliberately want some expert contracts
+    in train.
+ 
     ``wild_paths``: {cid: path}; ``wild_labels``: {cid: [5]};
     ``curated``: {cid: {"path", "y", "lines"}}.
+ 
+    Back-compat: if ``test_frac`` is passed (old callers), it overrides and the
+    expert pool is split with that test fraction, i.e. expert_train_frac becomes
+    ``1 - test_frac``.
     """
+    # Resolve how much of the EXPERT pool goes to test.
+    if test_frac is not None:
+        expert_test_frac = float(test_frac)
+    else:
+        expert_test_frac = 1.0 - float(expert_train_frac)
+    # Clamp into the splitter's usable range. We never use exactly 1.0 so the
+    # stratified splitter can still satisfy its per-class allocation cleanly;
+    # 0.98 sends essentially the whole pool to test while staying safe.
+    expert_test_frac = min(0.98, max(0.0, expert_test_frac))
+ 
     wild_sources = {cid: _read(p) for cid, p in wild_paths.items()}
     curated_sources = {cid: _read(v["path"]) for cid, v in curated.items()}
     kept, _removed, n_removed = dedup_wild_against_curated(wild_sources, curated_sources)
     kept = [c for c in sorted(kept) if c in wild_labels]   # must have a label
     if max_wild is not None:
         kept = kept[:max_wild]
-
-    # Wild -> train/val (stratified on its weak labels).
+ 
+    # Wild/DIVE -> train/val (stratified on its weak labels).
     if kept:
         Yw = np.array([wild_labels[c] for c in kept], dtype=int)
         wtr, wva = stratified_multilabel_split(Yw, test_frac=val_frac, seed=seed)
@@ -118,17 +147,20 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
         wtr, wva = np.array([], int), np.array([], int)
     wild_train = [kept[i] for i in wtr]
     wild_val = [kept[i] for i in wva]
-
-    # Curated -> frozen test split + remainder (stratified on expert labels).
+ 
+    # Expert pool (Curated + BIT) -> TEST (default whole) + optional train slice.
     cur_ids = sorted(curated)
     if cur_ids:
         Yc = np.array([curated[c]["y"] for c in cur_ids], dtype=int)
-        ctr, cte = stratified_multilabel_split(Yc, test_frac=test_frac, seed=seed)
+        # stratified_multilabel_split returns (train, test): the "test" side is
+        # the fraction we want in test. With expert_test_frac ~0.98, the train
+        # side is the tiny remainder (or empty), exactly as intended.
+        ctr, cte = stratified_multilabel_split(Yc, test_frac=expert_test_frac, seed=seed)
     else:
         ctr, cte = np.array([], int), np.array([], int)
-    cur_remainder = [cur_ids[i] for i in ctr]
-    cur_test = [cur_ids[i] for i in cte]
-
+    cur_remainder = [cur_ids[i] for i in ctr]   # -> train (usually empty)
+    cur_test = [cur_ids[i] for i in cte]        # -> test  (the whole expert pool)
+ 
     items: list[Item] = []
     for c in wild_train:
         items.append(Item(c, wild_paths[c], list(wild_labels[c]), "train", "wild"))
@@ -140,11 +172,11 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
     for c in cur_test:
         items.append(Item(c, curated[c]["path"], list(curated[c]["y"]), "test",
                           "curated", list(curated[c].get("lines", []))))
-
+ 
     train_hashes = {content_hash(_read(it.path)) for it in items if it.split == "train"}
     test_hashes = {content_hash(_read(it.path)) for it in items if it.split == "test"}
     assert_firewall(train_hashes, test_hashes)
-
+ 
     counts = {
         "train": sum(it.split == "train" for it in items),
         "val": sum(it.split == "val" for it in items),
