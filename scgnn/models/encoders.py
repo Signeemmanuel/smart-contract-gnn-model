@@ -39,7 +39,17 @@ class Encoder(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.last_attention = None  # (edge_index, alpha) from the first GAT layer
 
-    def forward(self, x, edge_index, batch):
+    def forward(self, x, edge_index, batch, size: int | None = None):
+        """Encode a (batched) graph and mean-pool to one vector per graph.
+
+        ``size`` is the number of graphs in the batch. It MUST be passed when a
+        graph in the batch may be EMPTY (zero nodes) — e.g. a contract whose CFG
+        extraction fell back and produced no nodes. Without it, global_mean_pool
+        infers the graph count from ``batch.max() + 1`` and silently drops any
+        trailing empty graph, yielding one fewer pooled row than the sibling
+        branch and breaking the downstream concat. With ``size`` given, empty
+        graphs still get a (zero) pooled row, keeping both branches aligned.
+        """
         self.last_attention = None
         for i, conv in enumerate(self.convs):
             if self.conv_name == "gat" and i == 0:
@@ -48,4 +58,4 @@ class Encoder(nn.Module):
             else:
                 x = conv(x, edge_index)
             x = self.drop(x.relu())
-        return global_mean_pool(x, batch)
+        return global_mean_pool(x, batch, size=size)

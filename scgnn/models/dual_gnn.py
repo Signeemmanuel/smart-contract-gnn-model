@@ -24,6 +24,27 @@ except Exception:  # the Hub mixin is optional at import time
         pass
 
 
+def _num_graphs(ast, cfg) -> int:
+    """Authoritative number of graphs in the batch.
+
+    Both views describe the SAME set of contracts, so they contain the same
+    number of graphs even when one view's graph is empty (zero nodes). We take
+    the count from whichever batch tensor reports the larger graph count, which
+    is robust when the LAST contract in the batch has an empty CFG (its batch
+    entries are absent, so cfg.batch.max() would under-count). PyG's Batch also
+    exposes ``num_graphs``; prefer it when present.
+    """
+    n = 0
+    for g in (ast, cfg):
+        ng = getattr(g, "num_graphs", None)
+        if ng is not None:
+            n = max(n, int(ng))
+        b = getattr(g, "batch", None)
+        if b is not None and b.numel() > 0:
+            n = max(n, int(b.max().item()) + 1)
+    return n or 1
+
+
 class DualGNN(nn.Module, PyTorchModelHubMixin):
     """AST encoder + CFG encoder -> concat -> small MLP head -> 5 logits."""
 
@@ -41,9 +62,14 @@ class DualGNN(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, ast, cfg) -> torch.Tensor:
+        # Pass the authoritative graph count to BOTH encoders so an empty graph
+        # in either view still yields a (zero) pooled row, keeping the two
+        # branches the same length before concat. Without this, a contract with
+        # an empty CFG makes the CFG branch one row short -> concat size mismatch.
+        n = _num_graphs(ast, cfg)
         h = torch.cat(
-            [self.ast(ast.x, ast.edge_index, ast.batch),
-             self.cfg(cfg.x, cfg.edge_index, cfg.batch)],
+            [self.ast(ast.x, ast.edge_index, ast.batch, size=n),
+             self.cfg(cfg.x, cfg.edge_index, cfg.batch, size=n)],
             dim=1,
         )
         return self.head(h)  # raw logits, shape (batch, n_classes)

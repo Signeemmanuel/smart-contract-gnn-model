@@ -6,16 +6,16 @@ training loop consumes, and it does so in the only correct order — the node-ty
 vocabulary and the PCA are fitted on the TRAIN split *only*, then every split is
 encoded with those frozen artefacts.
 
-Split policy (the deployed/headline arrangement, Condition C):
-* test  = the frozen, stratified Curated split (expert labels);
-* train = Wild (auto-labelled) + the Curated remainder (expert labels);
-* val   = a held-out slice of Wild, for early stopping.
-The A/B/C experiment later subsets these same indices.
+Split policy (the deployed/headline arrangement):
+* test  = the whole expert pool (Curated + BIT), gold labels + line annotations;
+* train = DIVE/Wild (auto-labelled, abundant) + an optional small expert slice;
+* val   = a held-out slice of DIVE/Wild, for early stopping / threshold tuning.
 
 Status: ``plan_splits`` is pure and unit-tested. ``materialise`` needs the full
 stack (solc/Slither, CodeBERT, torch) and runs on the Studio. Extraction is
 cached to ``out/raw/<hash>.json`` so a rerun or the second pass never re-runs
-Slither.
+Slither. The PCA is fitted on a bounded random SAMPLE of train snippets
+(``pca_fit_sample``) so the fit step stays within memory at DIVE scale.
 """
 
 from __future__ import annotations
@@ -101,23 +101,23 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
                 max_wild: int | None = None,
                 test_frac: float | None = None) -> SplitPlan:
     """Assign every contract to train/val/test, with de-dup + firewall. Pure.
- 
+
     Data policy (deployed/headline arrangement):
       * TRAIN  = DIVE/Wild (auto-labelled, abundant) + an optional small slice of
                  the expert pool (``expert_train_frac``, default 0.0 = none);
       * VAL    = a held-out slice of DIVE/Wild, for early stopping/threshold tuning;
       * TEST   = the expert pool (Curated + BIT), which carries gold-quality labels
                  and line annotations — kept whole for credible per-class metrics.
- 
+
     The expert pool defaults ENTIRELY to test because the training signal comes
     from DIVE; spending scarce expert positives (esp. dos) on train would starve
     the test set of exactly the rare classes we need to measure. Set
     ``expert_train_frac`` > 0 only if you deliberately want some expert contracts
     in train.
- 
+
     ``wild_paths``: {cid: path}; ``wild_labels``: {cid: [5]};
     ``curated``: {cid: {"path", "y", "lines"}}.
- 
+
     Back-compat: if ``test_frac`` is passed (old callers), it overrides and the
     expert pool is split with that test fraction, i.e. expert_train_frac becomes
     ``1 - test_frac``.
@@ -131,14 +131,14 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
     # stratified splitter can still satisfy its per-class allocation cleanly;
     # 0.98 sends essentially the whole pool to test while staying safe.
     expert_test_frac = min(0.98, max(0.0, expert_test_frac))
- 
+
     wild_sources = {cid: _read(p) for cid, p in wild_paths.items()}
     curated_sources = {cid: _read(v["path"]) for cid, v in curated.items()}
     kept, _removed, n_removed = dedup_wild_against_curated(wild_sources, curated_sources)
     kept = [c for c in sorted(kept) if c in wild_labels]   # must have a label
     if max_wild is not None:
         kept = kept[:max_wild]
- 
+
     # Wild/DIVE -> train/val (stratified on its weak labels).
     if kept:
         Yw = np.array([wild_labels[c] for c in kept], dtype=int)
@@ -147,7 +147,7 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
         wtr, wva = np.array([], int), np.array([], int)
     wild_train = [kept[i] for i in wtr]
     wild_val = [kept[i] for i in wva]
- 
+
     # Expert pool (Curated + BIT) -> TEST (default whole) + optional train slice.
     cur_ids = sorted(curated)
     if cur_ids:
@@ -160,7 +160,7 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
         ctr, cte = np.array([], int), np.array([], int)
     cur_remainder = [cur_ids[i] for i in ctr]   # -> train (usually empty)
     cur_test = [cur_ids[i] for i in cte]        # -> test  (the whole expert pool)
- 
+
     items: list[Item] = []
     for c in wild_train:
         items.append(Item(c, wild_paths[c], list(wild_labels[c]), "train", "wild"))
@@ -172,11 +172,11 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
     for c in cur_test:
         items.append(Item(c, curated[c]["path"], list(curated[c]["y"]), "test",
                           "curated", list(curated[c].get("lines", []))))
- 
+
     train_hashes = {content_hash(_read(it.path)) for it in items if it.split == "train"}
     test_hashes = {content_hash(_read(it.path)) for it in items if it.split == "test"}
     assert_firewall(train_hashes, test_hashes)
- 
+
     counts = {
         "train": sum(it.split == "train" for it in items),
         "val": sum(it.split == "val" for it in items),
@@ -188,12 +188,18 @@ def plan_splits(wild_paths: dict[str, str], wild_labels: dict[str, list[int]],
 
 def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
                 embed_dim: int = 64, seed: int = 42, extract_timeout: float = 120,
-                embed_batch: int = 128) -> dict:
+                embed_batch: int = 128, pca_fit_sample: int = 200_000) -> dict:
     """Extract, fit train-only artefacts, encode every split, write indices.
 
     ``extract_fn(path) -> (ast RawGraph, cfg RawGraph)``;
     ``embedder`` has ``.embed(snippet) -> np.ndarray``. Needs torch + the
     extraction stack; run on the Studio.
+
+    ``pca_fit_sample`` bounds how many unique train snippets are embedded to FIT
+    the PCA. At DIVE scale the train split has ~5M unique snippets; embedding all
+    of them (~15 GB array + a same-size embedder cache) OOM-kills the process. A
+    64-dim PCA is statistically stable from ~100-200k samples, so we fit on a
+    deterministic random sample. Set 0 to use all (only safe on small datasets).
     """
     import joblib
     import torch
@@ -236,8 +242,25 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     print("fitting train-only feature vocab + PCA ...", flush=True)
     train_ids = [it.cid for it in plan.items if it.split == "train" and it.cid in raws]
     train_graphs = [g for cid in train_ids for g in raws[cid]]
-    train_snippets = sorted({s for cid in train_ids for g in raws[cid] for s in g.snippets})
-    print(f"  embedding {len(train_snippets)} unique train snippets (batch {embed_batch}) ...",
+
+    # Feature vocab is cheap (counts node types) -> fit on ALL train graphs.
+    # PCA only needs a representative SAMPLE of snippets; embedding all of them
+    # (~5M for DIVE) would exhaust RAM. Sample deterministically, then embed only
+    # the sample.
+    all_train_snippets = sorted({s for cid in train_ids for g in raws[cid]
+                                 for s in g.snippets})
+    n_all = len(all_train_snippets)
+    if pca_fit_sample and n_all > pca_fit_sample:
+        rng = np.random.default_rng(seed)
+        pick = rng.choice(n_all, size=pca_fit_sample, replace=False)
+        train_snippets = [all_train_snippets[i] for i in sorted(pick)]
+        print(f"  PCA fit: sampling {len(train_snippets):,} of {n_all:,} unique "
+              f"train snippets (memory-safe)", flush=True)
+    else:
+        train_snippets = all_train_snippets
+        print(f"  PCA fit: using all {n_all:,} unique train snippets", flush=True)
+
+    print(f"  embedding {len(train_snippets):,} snippets (batch {embed_batch}) ...",
           flush=True)
     emb = (embedder.embed_many(train_snippets, batch_size=embed_batch)
            if train_snippets else np.zeros((0, 768), np.float32))
@@ -245,6 +268,7 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     k = int(min(embed_dim, emb.shape[0] or embed_dim, emb.shape[1] or embed_dim))
     feat_cfg = fit_feature_config(train_graphs, embed_dim=k)
     pca = fit_pca(emb, embed_dim=k, seed=seed) if emb.shape[0] >= k and k > 0 else None
+    del emb                              # free the embedding matrix before pass 2
     encoder = FeatureEncoder(feat_cfg, embedder if pca is not None else None, pca)
 
     # Pass 2 — encode every split and write records + indices.
