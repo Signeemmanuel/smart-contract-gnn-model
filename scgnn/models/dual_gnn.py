@@ -7,6 +7,16 @@ carry several flaws at once. The class mixes in ``PyTorchModelHubMixin`` so it
 gains ``save_pretrained`` / ``from_pretrained`` / ``push_to_hub`` and its config
 is pushed to the Hub bundle automatically; the fitted PCA and feature config
 ride alongside as extra files (see scripts/build_release_bundle.py).
+
+Empty graphs
+------------
+A contract whose CFG extraction degrades can yield a CFG with ZERO nodes while
+its AST is intact. ``global_mean_pool`` infers the number of graphs from
+``batch.max() + 1``, so an empty graph contributes no batch entries and is
+silently dropped: the CFG branch then pools to one fewer row than the AST branch
+and the concatenation below fails with a size mismatch. We therefore compute the
+authoritative graph count once and pass it to BOTH encoders, so an empty graph
+still receives a (zero) pooled row and the two branches stay aligned.
 """
 
 from __future__ import annotations
@@ -22,6 +32,30 @@ try:
 except Exception:  # the Hub mixin is optional at import time
     class PyTorchModelHubMixin:  # type: ignore
         pass
+
+
+def _num_graphs(ast, cfg) -> int:
+    """Authoritative number of graphs in the batch.
+
+    Both views describe the SAME set of contracts, so they contain the same
+    number of graphs even when one view's graph is empty. We take the largest
+    count either view reports, which is robust when the LAST contract in the
+    batch has an empty CFG (its batch entries are absent, so ``cfg.batch.max()``
+    would under-count). PyG's ``Batch`` also exposes ``num_graphs``; prefer it
+    when present. Falls back to 1 for a single unbatched graph.
+    """
+    n = 0
+    for g in (ast, cfg):
+        ng = getattr(g, "num_graphs", None)
+        if ng is not None:
+            try:
+                n = max(n, int(ng))
+            except (TypeError, ValueError):
+                pass
+        b = getattr(g, "batch", None)
+        if b is not None and b.numel() > 0:
+            n = max(n, int(b.max().item()) + 1)
+    return n or 1
 
 
 class DualGNN(nn.Module, PyTorchModelHubMixin):
@@ -41,9 +75,13 @@ class DualGNN(nn.Module, PyTorchModelHubMixin):
         )
 
     def forward(self, ast, cfg) -> torch.Tensor:
+        # Pass the authoritative graph count to BOTH encoders so an empty graph
+        # in either view still yields a (zero) pooled row, keeping the branches
+        # the same length before the concatenation.
+        n = _num_graphs(ast, cfg)
         h = torch.cat(
-            [self.ast(ast.x, ast.edge_index, ast.batch),
-             self.cfg(cfg.x, cfg.edge_index, cfg.batch)],
+            [self.ast(ast.x, ast.edge_index, ast.batch, size=n),
+             self.cfg(cfg.x, cfg.edge_index, cfg.batch, size=n)],
             dim=1,
         )
         return self.head(h)  # raw logits, shape (batch, n_classes)
