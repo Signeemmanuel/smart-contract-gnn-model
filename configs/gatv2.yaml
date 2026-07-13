@@ -1,0 +1,15 @@
+# Inherit base.yaml and override the architecture only, so any difference
+# between runs is attributable to the architecture.
+#
+# GATv2 (Brody et al., 2022) replaces GAT in the v2 model matrix. GAT computes
+# *static* attention: its scoring function ranks a node's neighbours in the same
+# order regardless of the query node, which is a strictly weaker attention.
+# GATv2 applies the linear layer after the non-linearity, making the attention
+# dynamic. GAT was also the weakest and least stable encoder in v1, so it is
+# retired from the active matrix and from the ensemble, while its v1 results are
+# retained for the before/after table.
+#
+# heads: 4 with the hidden width split across heads (128 / 4 = 32 per head,
+# concatenated back to 128), so the parameter budget matches GCN and GraphSAGE.
+extends: base.yaml
+conv: gatv2

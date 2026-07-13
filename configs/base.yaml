@@ -2,11 +2,11 @@
 # Defaults reflect the settled final recipe used for the reported results.
 seed: 42
 device: cuda          # falls back to cpu automatically if unavailable
-threshold: 0.5        # decision/flag threshold (reported policy; union labelling, not Snorkel)
-conv: sage            # gcn | sage | gat
+threshold: 0.5        # fallback only; v2 tunes per-class thresholds on VALIDATION
+conv: sage            # gcn | sage | gat (retired) | gatv2
 hid: 128
 layers: 3
-heads: 4              # used only by gat
+heads: 4              # used only by the attention encoders (gat, gatv2)
 dropout: 0.5
 n_classes: 5
 lr: 0.001
