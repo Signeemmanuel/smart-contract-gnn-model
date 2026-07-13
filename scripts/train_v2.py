@@ -240,6 +240,22 @@ def main() -> int:
 
     (out_root / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
 
+    # Test B probabilities per model, in the manifest's contract order, so
+    # scripts/durieux_baseline.py can place the models beside the four tools in
+    # one matrix. Thresholds travel with them (they were tuned on VAL).
+    tb_probs = {}
+    for seed in args.seeds:
+        for arm in ("nodf", "df"):
+            for run, probs in cached.get((seed, arm), {}).items():
+                tag = run if len(args.seeds) == 1 else f"{run}_s{seed}"
+                tb_probs[tag] = {
+                    "probs": probs["test_b"][1].tolist(),
+                    "thresholds": results[tag]["test_b"]["thresholds"],
+                }
+    (out_root / "test_b_probs.json").write_text(json.dumps(tb_probs), encoding="utf-8")
+    print(f"test-B probabilities -> {out_root / 'test_b_probs.json'} "
+          f"({len(tb_probs)} models, for the Durieux matrix)")
+
     best = max(results, key=lambda m: results[m]["test_b"]["macro"]["f1"])
     print("\n" + "=" * 64)
     print(f"{'run':<16} {'val':>7} {'test A':>8} {'test B':>8}")
