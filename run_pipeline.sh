@@ -46,6 +46,13 @@ DATA_NODF="${DATA_NODF:-data/processed_nodf}"     # build WITHOUT (ablation arm)
 RUNS="${RUNS:-runs/v2}"
 ARTIFACTS="${ARTIFACTS:-artifacts/v2}"
 WORKERS="${WORKERS:-40}"                          # labelling parallelism (CPU cores)
+# Per-tool time budget. 300s, not 120s: Osiris (symbolic execution) is markedly
+# slower than the other three and timed out on ~12% of contracts at 120s. Osiris
+# is the ONLY tool that detects arithmetic, so every Osiris timeout silently
+# labels that contract arithmetic=0 and systematically under-labels the class.
+# The higher ceiling costs wall-clock only on the tasks that would have timed
+# out; the ones that already finish fast are unaffected.
+TIMEOUT="${TIMEOUT:-300}"
 SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console script:
                                                   # it is a package named `sb`, run via -m
 # SmartBugs must be importable by the subprocesses the orchestrator spawns, and so
@@ -122,7 +129,7 @@ stage_tools() {
     python scripts/label_orchestrator.py \
       --wild-dir "$WILD" --results data/sb_results \
       --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
-      --workers "$WORKERS" --timeout 120 --limit 200 \
+      --workers "$WORKERS" --timeout "$TIMEOUT" --limit 200 \
       || die "smoke labelling failed; check SmartBugs/Docker before the full run."
     warn "Read the rate above and extrapolate to the full corpus BEFORE continuing."
     warn "Re-run this stage to proceed with the full run (the ledger resumes)."
@@ -133,7 +140,7 @@ stage_tools() {
   python scripts/label_orchestrator.py \
     --wild-dir "$WILD" --results data/sb_results \
     --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
-    --workers "$WORKERS" --timeout 120 --max-attempts 2
+    --workers "$WORKERS" --timeout "$TIMEOUT" --max-attempts 2
 }
 
 stage_label() {
