@@ -46,7 +46,12 @@ DATA_NODF="${DATA_NODF:-data/processed_nodf}"     # build WITHOUT (ablation arm)
 RUNS="${RUNS:-runs/v2}"
 ARTIFACTS="${ARTIFACTS:-artifacts/v2}"
 WORKERS="${WORKERS:-40}"                          # labelling parallelism (CPU cores)
-export PYTHONPATH="${PYTHONPATH:-.}"
+SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console script:
+                                                  # it is a package named `sb`, run via -m
+# SmartBugs must be importable by the subprocesses the orchestrator spawns, and so
+# must this repo. NOTE: never run SmartBugs from inside its own checkout - its
+# sb/docker.py would shadow the real Docker SDK.
+export PYTHONPATH="${SMARTBUGS}:${PYTHONPATH:-.}"
 
 cd "$REPO"
 say() { printf "\n\033[1;36m==> %s\033[0m\n" "$*"; }
@@ -116,7 +121,7 @@ stage_tools() {
     say "TOOLS - timed smoke batch (200 contracts) to measure the labelling rate"
     python scripts/label_orchestrator.py \
       --wild-dir "$WILD" --results data/sb_results \
-      --ledger data/labelling_ledger.sqlite \
+      --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
       --workers "$WORKERS" --timeout 120 --limit 200 \
       || die "smoke labelling failed; check SmartBugs/Docker before the full run."
     warn "Read the rate above and extrapolate to the full corpus BEFORE continuing."
@@ -127,7 +132,7 @@ stage_tools() {
   say "TOOLS - full corpus (resumable: safe to interrupt and re-run)"
   python scripts/label_orchestrator.py \
     --wild-dir "$WILD" --results data/sb_results \
-    --ledger data/labelling_ledger.sqlite \
+    --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
     --workers "$WORKERS" --timeout 120 --max-attempts 2
 }
 
@@ -183,7 +188,8 @@ stage_durieux() {
   say "DURIEUX - run the four tools directly on Test B (small; resumable)"
   python scripts/durieux_baseline.py run \
     --testsets "$TESTSETS" --results data/sb_testb \
-    --ledger data/testb_ledger.sqlite --workers 16 --timeout 300
+    --ledger data/testb_ledger.sqlite --sb-cmd "$SB_CMD" \
+    --workers 16 --timeout 300
 
   say "DURIEUX - tool-vs-model matrix (T5 + F4.11)"
   local probs="$RUNS/test_b_probs.json"

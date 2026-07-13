@@ -72,13 +72,31 @@ else
     || ( cd "$SMARTBUGS" && pip install -e . ) \
     || warn "pip install of SmartBugs failed; see its README for the supported route."
 
+  # pip may put console scripts in ~/.local/bin, which is not always on PATH.
+  if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+    echo "    added ~/.local/bin to PATH"
+  fi
+
+  # SmartBugs 2.x ships its code as a package literally named `sb` and does NOT
+  # install a console script. It must be run as `python -m sb` with the SmartBugs
+  # checkout on PYTHONPATH, and crucially NOT from inside that checkout: its own
+  # sb/docker.py would then shadow the real Docker SDK and the import fails with
+  #     ModuleNotFoundError: No module named 'docker.models'
+  # So we always invoke it with PYTHONPATH set, from the repo's working dir.
+  SB_CMD=""
   if command -v sb >/dev/null 2>&1; then
-    echo "    sb installed: $(command -v sb)"
+    echo "    sb console script found: $(command -v sb)"
+    SB_CMD="sb"
+  elif PYTHONPATH="$SMARTBUGS" python -m sb --version >/dev/null 2>&1; then
+    SB_CMD="python -m sb"
+    export PYTHONPATH="$SMARTBUGS:${PYTHONPATH:-.}"
+    echo "    SmartBugs runs as: PYTHONPATH=$SMARTBUGS python -m sb"
+    PYTHONPATH="$SMARTBUGS" python -m sb --version | head -1 | sed 's/^/    /'
   else
-    warn "the 'sb' command is still not on PATH."
-    warn "SmartBugs may be module-invoked instead. If so, run the labelling with:"
-    warn "    python scripts/label_orchestrator.py ... --sb-cmd \"python -m sb\""
-    warn "(and set SB_CMD=\"python -m sb\" before run_pipeline.sh)"
+    warn "SmartBugs will not run. Tried the 'sb' script and 'python -m sb'."
+    warn "Check: PYTHONPATH=\"$SMARTBUGS\" python -m sb --version"
+    SB_CMD="python -m sb"
   fi
 
   say "tier 3: pre-pulling the four tool images (slow once, then cached)"
@@ -147,25 +165,54 @@ print("  empty-CFG contract handled (no size mismatch):", tuple(out.shape))
 PY
 
 say "SmartBugs smoke: one tool on one contract (proves Docker + the tool image)"
-if command -v sb >/dev/null 2>&1 && [ -d data/raw/curated ]; then
+if [ -n "$SB_CMD" ] && [ -d data/raw/curated ]; then
   SOL=$(find data/raw/curated -name "*.sol" | head -1)
   if [ -n "$SOL" ]; then
     rm -rf /tmp/sbsmoke
-    sb -t slither -f "$SOL" --results /tmp/sbsmoke --json \
-      && find /tmp/sbsmoke -name "result.json" | head -1 \
-      && echo "    SmartBugs produced result.json: labelling will work." \
-      || warn "SmartBugs ran but produced no result.json; check its output above."
+    # Run with SmartBugs on PYTHONPATH but from THIS directory, so its sb/docker.py
+    # cannot shadow the real Docker SDK.
+    if PYTHONPATH="$SMARTBUGS" $SB_CMD -t slither -f "$SOL" \
+         --results /tmp/sbsmoke --json 2>&1 | tail -3
+    then
+      if find /tmp/sbsmoke -name "result.json" | head -1 | grep -q .; then
+        echo "    SmartBugs produced result.json: LABELLING WILL WORK."
+      else
+        warn "SmartBugs ran but produced no result.json; inspect its output above."
+      fi
+    else
+      warn "SmartBugs failed on the smoke contract; inspect the output above."
+    fi
   fi
 else
-  warn "skipping SmartBugs smoke (no 'sb' on PATH, or data/raw/curated not downloaded yet)."
-  warn "Run 'bash run_pipeline.sh data' first, then re-run this smoke by hand."
+  warn "skipping SmartBugs smoke (data/raw/curated not downloaded yet)."
+  warn "Run 'bash run_pipeline.sh data' first, then re-run this script."
 fi
 
 # -----------------------------------------------------------------------------
+say "persist the environment so run_pipeline.sh sees it in a new shell"
+# setup runs in its own process, so exports here would die with it. Append them
+# to the shell profile (idempotently) so a fresh terminal picks them up. This is
+# what was missing when SMARTBUGS came back empty.
+SB_CMD="${SB_CMD:-sb}"
+PROFILE="$HOME/.bashrc"
+[ "$(basename "${SHELL:-}")" = "zsh" ] && [ -f "$HOME/.zshrc" ] && PROFILE="$HOME/.zshrc"
+add_line() { grep -qxF "$1" "$PROFILE" 2>/dev/null || echo "$1" >> "$PROFILE"; }
+add_line "# --- scgnn-model pipeline ---"
+add_line "export SMARTBUGS=\"$SMARTBUGS\""
+add_line "export SB_CMD=\"$SB_CMD\""
+# SmartBugs must be importable (it is a package named `sb`), and the repo root
+# must be importable too (for training/ and scripts/). Both go on PYTHONPATH.
+add_line "export PYTHONPATH=\"$SMARTBUGS:.\""
+[ -d "$HOME/.local/bin" ] && add_line "export PATH=\"\$HOME/.local/bin:\$PATH\""
+echo "    wrote to $PROFILE:"
+echo "      SMARTBUGS=$SMARTBUGS"
+echo "      SB_CMD=$SB_CMD"
+echo "      PYTHONPATH=$SMARTBUGS:."
+
 say "freeze the committed lockfile"
 pip freeze > requirements-lock.txt
 say "DONE. Commit requirements-lock.txt."
 echo
-echo "Next:  export SMARTBUGS=\"$SMARTBUGS\""
+echo "Next:  source $PROFILE                # load SMARTBUGS / SB_CMD / PATH"
 echo "       bash run_pipeline.sh data      # download Wild + Curated"
 echo "       bash run_pipeline.sh tools     # timed smoke batch, then the full run"

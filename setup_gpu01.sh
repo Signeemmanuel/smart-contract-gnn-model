@@ -116,12 +116,29 @@ else
     ( cd "$SMARTBUGS" && pip install -e . ) \
       || warn "pip install of SmartBugs failed; see its README."
 
+    if [ -d "$HOME/.local/bin" ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+      export PATH="$HOME/.local/bin:$PATH"
+      ok "added ~/.local/bin to PATH"
+    fi
+
+    # SmartBugs 2.x ships its code as a package literally named `sb` and installs
+    # NO console script. It must be run as `python -m sb` with the SmartBugs
+    # checkout on PYTHONPATH, and NOT from inside that checkout: its own
+    # sb/docker.py would shadow the real Docker SDK and the import dies with
+    #     ModuleNotFoundError: No module named 'docker.models'
+    SB_CMD=""
     if command -v sb >/dev/null 2>&1; then
-      ok "sb installed: $(command -v sb)"
+      ok "sb console script found: $(command -v sb)"
+      SB_CMD="sb"
+    elif PYTHONPATH="$SMARTBUGS" python -m sb --version >/dev/null 2>&1; then
+      SB_CMD="python -m sb"
+      export PYTHONPATH="$SMARTBUGS:${PYTHONPATH:-.}"
+      ok "SmartBugs runs as: PYTHONPATH=$SMARTBUGS python -m sb"
+      PYTHONPATH="$SMARTBUGS" python -m sb --version | head -1 | sed 's/^/    /'
     else
-      warn "'sb' is not on PATH. SmartBugs may be module-invoked. If so, run:"
-      warn "    export SB_CMD=\"python -m sb\""
-      warn "    python scripts/label_orchestrator.py ... --sb-cmd \"\$SB_CMD\""
+      warn "SmartBugs will not run. Tried 'sb' and 'python -m sb'."
+      warn "Check: PYTHONPATH=\"$SMARTBUGS\" python -m sb --version"
+      SB_CMD="python -m sb"
     fi
 
     say "7. pre-pulling the four tool images (slow once, then cached)"
@@ -218,6 +235,32 @@ PYTHONPATH=. python -m pytest -q tests/ || warn "tests reported failures - inspe
 say "12. freeze the committed lockfile for THIS box"
 pip freeze > requirements-lock.txt
 
+# -----------------------------------------------------------------------------
+say "13. persist the environment so run_pipeline.sh sees it in a new shell"
+# setup runs in its own process: exports here would die with it. Append them to
+# the shell profile (idempotently) so a fresh terminal, and run_pipeline.sh, pick
+# them up. This is what was missing when SMARTBUGS came back empty.
+SB_CMD="${SB_CMD:-sb}"
+PROFILE="$HOME/.bashrc"
+[ -n "${ZSH_VERSION:-}" ] && PROFILE="$HOME/.zshrc"
+[ -f "$HOME/.zshrc" ] && [ "$(basename "${SHELL:-}")" = "zsh" ] && PROFILE="$HOME/.zshrc"
+
+add_line() {   # append only if not already there
+  grep -qxF "$1" "$PROFILE" 2>/dev/null || echo "$1" >> "$PROFILE"
+}
+add_line "# --- scgnn-model pipeline ---"
+add_line "export SMARTBUGS=\"$SMARTBUGS\""
+add_line "export SB_CMD=\"$SB_CMD\""
+# SmartBugs is a package named `sb` and must be importable; the repo root must be
+# too (for training/ and scripts/). Both go on PYTHONPATH.
+add_line "export PYTHONPATH=\"$SMARTBUGS:.\""
+[ -d "$HOME/.local/bin" ] && add_line "export PATH=\"\$HOME/.local/bin:\$PATH\""
+ok "wrote SMARTBUGS, SB_CMD, PYTHONPATH to $PROFILE"
+echo "    SMARTBUGS=$SMARTBUGS"
+echo "    SB_CMD=$SB_CMD"
+echo "    PYTHONPATH=$SMARTBUGS:."
+echo "    Apply to THIS shell now:  source $PROFILE"
+
 say "DONE."
 echo
 echo "Review the checks above, especially:"
@@ -226,6 +269,6 @@ echo "  * step 9: does the GPU forward pass work?"
 echo "  * step 10: are data-flow edges being produced?"
 echo
 echo "Next:"
-echo "  export SMARTBUGS=\"$SMARTBUGS\""
+echo "  source $PROFILE                   # load SMARTBUGS / SB_CMD / PATH"
 echo "  bash run_pipeline.sh tag data     # tag v1, download Wild + Curated"
 echo "  bash run_pipeline.sh tools        # timed smoke batch, then the full run"
