@@ -45,7 +45,7 @@ DATA_DF="${DATA_DF:-data/processed_df}"           # build WITH data-flow edges
 DATA_NODF="${DATA_NODF:-data/processed_nodf}"     # build WITHOUT (ablation arm)
 RUNS="${RUNS:-runs/v2}"
 ARTIFACTS="${ARTIFACTS:-artifacts/v2}"
-WORKERS="${WORKERS:-40}"                          # labelling parallelism (CPU cores)
+WORKERS="${WORKERS:-64}"                          # labelling parallelism (CPU cores)
 # Per-tool time budget. 300s, not 120s: Osiris (symbolic execution) is markedly
 # slower than the other three and timed out on ~12% of contracts at 120s. Osiris
 # is the ONLY tool that detects arithmetic, so every Osiris timeout silently
@@ -60,10 +60,28 @@ SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console
 # sb/docker.py would shadow the real Docker SDK.
 export PYTHONPATH="${SMARTBUGS}:${PYTHONPATH:-.}"
 
+# Off-instance sync (section 5: the disk is ephemeral). Set SYNC_REPO to a
+# private HF dataset repo id and export a FRESH HF_TOKEN; every long stage then
+# pushes its artefacts off-box when it finishes. The continuous loop for DURING
+# long runs is separate:  tmux new -s sync -d \
+#   'python scripts/sync_offbox.py --repo-id $SYNC_REPO --interval 15 2>&1 | tee -a sync.log'
+SYNC_REPO="${SYNC_REPO:-}"
+
 cd "$REPO"
 say() { printf "\n\033[1;36m==> %s\033[0m\n" "$*"; }
 warn() { printf "\n\033[1;33mWARNING: %s\033[0m\n" "$*" >&2; }
 die() { printf "\n\033[1;31mERROR: %s\033[0m\n" "$*" >&2; exit 1; }
+
+# One-shot off-box sync after a stage; a no-op (with a nag) when unconfigured.
+maybe_sync() {
+  if [ -n "$SYNC_REPO" ] && [ -n "${HF_TOKEN:-}" ]; then
+    say "SYNC - pushing artefacts to $SYNC_REPO"
+    python scripts/sync_offbox.py --repo-id "$SYNC_REPO" --once \
+      || warn "off-box sync failed; artefacts exist only on this instance."
+  else
+    warn "SYNC_REPO/HF_TOKEN not set: artefacts exist ONLY on this ephemeral instance."
+  fi
+}
 
 # The winning model, read from results.json (never hardcoded: the data decides).
 winner() {
@@ -131,6 +149,14 @@ stage_tools() {
       --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
       --workers "$WORKERS" --timeout "$TIMEOUT" --limit 200 \
       || die "smoke labelling failed; check SmartBugs/Docker before the full run."
+
+    # Trust the disk, not the exit codes (the lesson of the no-op run): the
+    # results tree must hold roughly 4 result.json per ok contract.
+    local njson; njson=$(find data/sb_results -name result.json 2>/dev/null | wc -l)
+    say "TOOLS - smoke verification: ${njson} result.json files on disk"
+    [ "$njson" -ge 100 ] || die "results tree is nearly empty (${njson} files): the \
+tools did NOT run. Do not start the full run; investigate one task by hand."
+    maybe_sync
     warn "Read the rate above and extrapolate to the full corpus BEFORE continuing."
     warn "Re-run this stage to proceed with the full run (the ledger resumes)."
     return 0
@@ -141,6 +167,7 @@ stage_tools() {
     --wild-dir "$WILD" --results data/sb_results \
     --ledger data/labelling_ledger.sqlite --sb-cmd "$SB_CMD" \
     --workers "$WORKERS" --timeout "$TIMEOUT" --max-attempts 2
+  maybe_sync
 }
 
 stage_label() {
@@ -152,6 +179,7 @@ stage_label() {
     bash save_labels_to_github.sh || warn "could not commit labels.parquet; save it manually."
   fi
   warn "labels.parquet is the expensive artefact. Keep a second copy off this box."
+  maybe_sync
 }
 
 stage_freeze() {
@@ -161,6 +189,7 @@ stage_freeze() {
     --curated-dir "$CURATED" --out "$TESTSETS" \
     --target-per-class 100 --min-per-class 60 --neg-ratio 2.0
   warn "Commit $TESTSETS/*.csv now. They are frozen: never redraw them."
+  maybe_sync
 }
 
 stage_build() {
@@ -189,6 +218,7 @@ stage_train() {
     --configs configs --out "$RUNS" --seeds 42 \
     || die "training matrix failed."
   say "TRAIN - winner on the expert test set: $(winner)"
+  maybe_sync
 }
 
 stage_durieux() {
@@ -210,6 +240,7 @@ stage_durieux() {
     python scripts/durieux_baseline.py matrix \
       --testsets "$TESTSETS" --results data/sb_testb --out "$ARTIFACTS"
   fi
+  maybe_sync
 }
 
 stage_localise() {
@@ -228,6 +259,7 @@ localising the best single model instead: $w"
       --out "$RUNS/$w/localisation_tol${t}.json" \
       || warn "localisation (tolerance $t) failed; v1 numbers stand."
   done
+  maybe_sync
 }
 
 stage_figures() {
@@ -246,6 +278,7 @@ print("best model:", out["best_model"])
 print("tables:", out["tables"])
 print("figures:", out["figures"])
 PY
+  maybe_sync
 }
 
 stage_release() {
@@ -267,6 +300,7 @@ bundle is the best single model, $w. Report both."
     --out "release/${w}_v2"
   say "RELEASE - bundle ready at release/${w}_v2 (v1's bundle is untouched)"
   echo "Publish with: python scripts/publish_model.py --bundle release/${w}_v2 --repo-id <id> --version v2"
+  maybe_sync
 }
 
 ALL=(setup tag data tools label freeze build train durieux localise figures release)
@@ -279,7 +313,8 @@ for stage in "$@"; do
     tools) stage_tools ;; label) stage_label ;; freeze) stage_freeze ;;
     build) stage_build ;; train) stage_train ;; durieux) stage_durieux ;;
     localise) stage_localise ;; figures) stage_figures ;; release) stage_release ;;
-    *) die "unknown stage '$stage'. Valid: ${ALL[*]} (or 'all')." ;;
+    sync) maybe_sync ;;
+    *) die "unknown stage '$stage'. Valid: ${ALL[*]}, sync (or 'all')." ;;
   esac
 done
 say "DONE: $*"

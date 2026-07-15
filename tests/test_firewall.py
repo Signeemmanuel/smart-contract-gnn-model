@@ -4,12 +4,17 @@ the TWO frozen test sets (Test A tool-labelled + Test B expert Curated).
 Non-negotiable #4: the firewall must exclude, from train and val, (a) every
 contract in Test Set A and (b) every Curated contract (Test B provenance). This
 test FAILS the build on any leak and now covers Test A as well as Curated.
+
+The canonical content hash is comment-stripped and whitespace-collapsed; the
+comment-stripping tests below pin the string-literal-safe behaviour so a hash
+change can never silently regress the firewall.
 """
 import numpy as np
 import pytest
 
 from training.data.firewall import (
-    content_hash, dedup_wild_against_curated, stratified_multilabel_split, assert_firewall,
+    content_hash, dedup_wild_against_curated, strip_comments,
+    stratified_multilabel_split, assert_firewall,
 )
 from training.data.testsets import (
     select_test_a, select_test_b, write_manifest, read_manifest,
@@ -51,7 +56,41 @@ def test_assert_firewall_detects_leak():
         assert_firewall({"a", "b", "c"}, {"c", "d"})
 
 
-# ------------------------------------------------------- NEW: Test A + Test B firewall
+# ----------------------------------------------- NEW: comment-stripped hashing
+
+def test_content_hash_ignores_comments():
+    """A comment-edited copy of a contract must hash equal to the original, so
+    it can never evade the firewall or waste labelling compute."""
+    base = "contract C { uint x; }"
+    line = "contract C { uint x; } // audited 2026"
+    block = "/* SPDX header */ contract C { uint x; }"
+    inline = "contract C { /* width */ uint x; }"
+    assert content_hash(base) == content_hash(line)
+    assert content_hash(base) == content_hash(block)
+    assert content_hash(base) == content_hash(inline)
+
+
+def test_strip_comments_preserves_string_literals():
+    """// inside a string is NOT a comment; two contracts differing only inside
+    a string literal must hash differently."""
+    a = 'contract C { string u = "https://a.io"; }'
+    b = 'contract C { string u = "https:"; }'
+    assert "https://a.io" in strip_comments(a)
+    assert content_hash(a) != content_hash(b)
+    # escaped quote inside a string does not end it early
+    c = 'contract C { string s = "he said \\"hi\\" // ok"; }'
+    assert '// ok' in strip_comments(c)
+
+
+def test_strip_comments_keeps_token_boundaries():
+    """A block comment between tokens must not fuse them (a/*x*/b -> a b)."""
+    assert strip_comments("uint/*gap*/a;") == "uint a;"
+    # and hashes reflect the preserved boundary: 'uint a' != 'uinta'
+    assert content_hash("uint/*gap*/a;") == content_hash("uint a;")
+    assert content_hash("uint/*gap*/a;") != content_hash("uinta;")
+
+
+# ------------------------------------------------------- Test A + Test B firewall
 
 @pytest.fixture
 def mock_pool(tmp_path):
