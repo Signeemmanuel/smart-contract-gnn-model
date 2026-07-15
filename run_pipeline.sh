@@ -53,7 +53,7 @@ WORKERS="${WORKERS:-64}"                          # labelling parallelism (CPU c
 # and 600s buys real per-tool coverage for roughly 7-14 wall-hours across the
 # full corpus. Osiris (the only arithmetic detector) barely times out at either
 # budget (3 of 185 at 300s). Tasks that already finish fast are unaffected.
-TIMEOUT="${TIMEOUT:-600}"
+TIMEOUT="${TIMEOUT:-300}"
 SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console script:
                                                   # it is a package named `sb`, run via -m
 # SmartBugs must be importable by the subprocesses the orchestrator spawns, and so
