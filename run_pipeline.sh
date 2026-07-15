@@ -46,13 +46,14 @@ DATA_NODF="${DATA_NODF:-data/processed_nodf}"     # build WITHOUT (ablation arm)
 RUNS="${RUNS:-runs/v2}"
 ARTIFACTS="${ARTIFACTS:-artifacts/v2}"
 WORKERS="${WORKERS:-64}"                          # labelling parallelism (CPU cores)
-# Per-tool time budget. 300s, not 120s: Osiris (symbolic execution) is markedly
-# slower than the other three and timed out on ~12% of contracts at 120s. Osiris
-# is the ONLY tool that detects arithmetic, so every Osiris timeout silently
-# labels that contract arithmetic=0 and systematically under-labels the class.
-# The higher ceiling costs wall-clock only on the tasks that would have timed
-# out; the ones that already finish fast are unaffected.
-TIMEOUT="${TIMEOUT:-300}"
+# Per-tool time budget. 600s (raised from 300s after the 200-contract smoke on
+# the 122-core box): at 300s Mythril and Securify timed out on ~23% of their
+# tasks (43 and 39 of 185). A timeout is an abstention under the union rule,
+# never a clean verdict, but recovering the verdicts that finish between 300s
+# and 600s buys real per-tool coverage for roughly 7-14 wall-hours across the
+# full corpus. Osiris (the only arithmetic detector) barely times out at either
+# budget (3 of 185 at 300s). Tasks that already finish fast are unaffected.
+TIMEOUT="${TIMEOUT:-600}"
 SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console script:
                                                   # it is a package named `sb`, run via -m
 # SmartBugs must be importable by the subprocesses the orchestrator spawns, and so
