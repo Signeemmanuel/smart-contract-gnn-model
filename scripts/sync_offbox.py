@@ -7,14 +7,21 @@ work:
 
   * the labelling ledger (snapshotted via SQLite's backup API, so a mid-write
     upload can never capture a torn file)
-  * data/sb_results/           (the raw tool results: the most expensive
-                                artefact of the project, and the only source
-                                labels.parquet can be rebuilt from — synced
-                                incrementally, only new files upload)
   * data/processed/            (labels.parquet + labelling reports)
   * data/testsets/             (the frozen manifests, once they exist)
   * runs/                      (checkpoints, configs, histories, results.json)
   * artifacts/                 (tables, figures, summaries)
+
+data/sb_results is deliberately NOT in the default set: at full-corpus scale it
+is >500k tiny files, and per-file sync at that scale produces thousands of Hub
+commits and 504s (observed). Once labelling completes, the tree is immutable:
+archive it ONCE and upload the archive as a single object instead:
+
+    tar -I 'zstd -T0 -3' -cf sb_results_final.tar.zst -C data sb_results
+    hf upload <repo-id> sb_results_final.tar.zst archives/sb_results_final.tar.zst --repo-type dataset
+
+During a labelling run, the ledger snapshot (always synced) plus orchestrator
+resume bounds the loss window to re-runnable work.
 
 Auth: the ``HF_TOKEN`` environment variable (export it in the shell or via a
 non-committed .env; NEVER commit the token). The repo is created private on
@@ -39,7 +46,7 @@ import tempfile
 import time
 from pathlib import Path
 
-DEFAULT_PATHS = ["data/sb_results", "data/processed", "data/testsets", "runs", "artifacts"]
+DEFAULT_PATHS = ["data/processed", "data/testsets", "runs", "artifacts"]
 
 
 def snapshot_sqlite(src: Path, dst: Path) -> None:
