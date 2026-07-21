@@ -23,11 +23,16 @@ Two builds are needed for the ablation, sharing one cache:
         --wild-dir data/raw/wild --wild-labels data/processed/labels.parquet \
         --curated-dir data/raw/curated --testsets data/testsets \
         --out data/processed_nodf --cache data/extract_cache --no-data-flow
+
+Pass-1 extraction runs across ``--jobs`` worker processes (see
+training/data/build.py); the second ablation arm finds a full cache and does no
+extraction at all.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -57,6 +62,10 @@ def main() -> int:
     ap.add_argument("--pca-fit-sample", type=int, default=200_000,
                     help="Max snippets embedded to FIT the PCA (0 = all). Bounds the "
                          "fit's memory at full-corpus scale.")
+    ap.add_argument("--jobs", type=int,
+                    default=max(1, min(64, (os.cpu_count() or 2) - 2)),
+                    help="Parallel extraction worker processes for Pass 1. Slither is "
+                         "CPU-bound; ~1 job per core, minus headroom for the parent.")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--solc", default=None, help="Force one solc binary for every contract.")
     ap.add_argument("--seed", type=int, default=42)
@@ -154,6 +163,9 @@ def main() -> int:
         extract_timeout=args.extract_timeout, embed_batch=args.embed_batch,
         pca_fit_sample=args.pca_fit_sample,
         with_data_flow=args.with_data_flow,
+        extract_jobs=args.jobs,
+        extract_ctx={"solc_binary": args.solc, "binaries": binaries,
+                     "full_binaries": full_binaries},
     )
     print("build report:", json.dumps({k: v for k, v in report.items() if k != "failed"},
                                       indent=2))

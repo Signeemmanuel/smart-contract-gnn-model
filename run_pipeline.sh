@@ -45,7 +45,8 @@ DATA_DF="${DATA_DF:-data/processed_df}"           # build WITH data-flow edges
 DATA_NODF="${DATA_NODF:-data/processed_nodf}"     # build WITHOUT (ablation arm)
 RUNS="${RUNS:-runs/v2}"
 ARTIFACTS="${ARTIFACTS:-artifacts/v2}"
-WORKERS="${WORKERS:-64}"                          # labelling parallelism (CPU cores)
+WORKERS="${WORKERS:-64}"
+BUILD_JOBS="${BUILD_JOBS:-96}"                    # parallel Slither extraction workers in the build stage                          # labelling parallelism (CPU cores)
 # Per-tool time budget. 600s (raised from 300s after the 200-contract smoke on
 # the 122-core box): at 300s Mythril and Securify timed out on ~23% of their
 # tasks (43 and 39 of 185). A timeout is an abstention under the union rule,
@@ -205,6 +206,7 @@ stage_build() {
     --wild-dir "$WILD" --wild-labels "$PROCESSED/labels.parquet" \
     --curated-dir "$CURATED" --testsets "$TESTSETS" \
     --out "$DATA_DF" --cache "$CACHE" --with-data-flow --device cuda \
+    --jobs "$BUILD_JOBS" \
     || die "build (with data-flow) failed."
 
   say "BUILD - WITHOUT data-flow edges -> $DATA_NODF (reuses the cache: no re-extraction)"
@@ -212,6 +214,7 @@ stage_build() {
     --wild-dir "$WILD" --wild-labels "$PROCESSED/labels.parquet" \
     --curated-dir "$CURATED" --testsets "$TESTSETS" \
     --out "$DATA_NODF" --cache "$CACHE" --no-data-flow --device cuda \
+    --jobs "$BUILD_JOBS" \
     || die "build (without data-flow) failed."
 }
 

@@ -29,6 +29,17 @@ arm does NOT re-extract: ``materialise(..., with_data_flow=False)`` strips the
 data-flow edges from the SAME cached graphs via ``RawGraph.without_data_flow()``,
 so both arms share identical node features and extraction is paid for once.
 
+Parallel extraction
+-------------------
+At full-corpus scale (~45k contracts) serial Slither extraction is days of
+wall-clock on one core while the rest idle. Pass 1 therefore runs across a
+process pool when ``extract_jobs > 1``: each worker extracts one contract under
+its own SIGALRM time limit and writes the shared cache file atomically, then
+the parent loads the caches. Workers use the ``spawn`` start method (so a
+CUDA-initialised parent is never forked) and are recycled every few tasks to
+bound Slither's per-process memory growth. The serial path (``extract_fn``)
+is retained for tests, smoke runs and the cache-only second ablation arm.
+
 Memory
 ------
 At full-corpus scale the train split can hold millions of unique snippets;
@@ -77,7 +88,9 @@ def _time_limit(seconds: float):
     a single pathological contract can hang the whole build with the CPU idle
     (blocked on a stuck compile). This raises :class:`ExtractTimeout`, which the
     extraction loop catches and logs as a per-contract failure. A no-op where
-    SIGALRM is unavailable (non-Unix, or not the main thread).
+    SIGALRM is unavailable (non-Unix, or not the main thread). Inside a process
+    pool each worker's tasks run in that worker's main thread, so the limit
+    applies per task there too.
     """
     usable = seconds and seconds > 0 and hasattr(signal, "SIGALRM")
     if not usable:
@@ -259,12 +272,58 @@ def plan_splits_v2(
     return SplitPlan(items=items, counts=counts)
 
 
+# ------------------------------------------------- parallel extraction workers
+
+_PP: dict = {}     # per-worker extraction context, set by _pp_init
+
+
+def _pp_init(solc_binary, binaries, full_binaries):
+    """Process-pool initialiser: build the extraction closure once per worker.
+
+    Runs in the child (spawn start method), so Slither/solc state never touches
+    the CUDA-initialised parent. Also quiets Slither's per-function ERROR spam,
+    which would otherwise multiply by the worker count.
+    """
+    import logging
+    for name in ("Slither", "SlitherSolcParsing", "CryticCompile", "crytic_compile"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+    from scgnn.extraction.extract import extract_contract
+    _PP["extract"] = lambda p: extract_contract(
+        p, solc_binary=solc_binary, binaries=binaries,
+        full_binaries=full_binaries, with_data_flow=True,
+    )
+
+
+def _pp_extract(task: tuple[str, str, str, float]) -> tuple[str, str | None]:
+    """Extract one contract in a pool worker and write its cache atomically.
+
+    ``task`` is (cid, path, cache_path, timeout). Returns (cid, error) with
+    ``error is None`` on success. The SIGALRM time limit applies here because
+    pool tasks run in the worker's main thread. The graphs travel via the cache
+    file, not the IPC pipe, so results stay small.
+    """
+    cid, path, cache_path, timeout = task
+    cache = Path(cache_path)
+    try:
+        with _time_limit(timeout):
+            ast, cfg = _PP["extract"](path)
+        tmp = cache.with_name(cache.name + ".tmp")           # atomic -> interrupt-safe
+        tmp.write_text(json.dumps({"ast": ast.to_dict(), "cfg": cfg.to_dict()}),
+                       encoding="utf-8")
+        tmp.replace(cache)
+        return cid, None
+    except Exception as exc:                                 # skip & log; never guess
+        return cid, str(exc)
+
+
 # ---------------------------------------------------------------- materialise
 
 def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
                 embed_dim: int = 64, seed: int = 42, extract_timeout: float = 120,
                 embed_batch: int = 128, pca_fit_sample: int = 200_000,
-                with_data_flow: bool = True) -> dict:
+                with_data_flow: bool = True,
+                extract_jobs: int = 1,
+                extract_ctx: dict | None = None) -> dict:
     """Extract, fit train-only artefacts, encode every split, write indices.
 
     ``extract_fn(path) -> (ast RawGraph, cfg RawGraph)``; ``embedder`` exposes
@@ -273,6 +332,13 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     ``with_data_flow=False`` is the ablation's "without" arm: the SAME cached
     graphs are used, with data-flow edges stripped, so the two arms differ only
     in the data-flow representation and extraction is not repeated.
+
+    ``extract_jobs > 1`` with ``extract_ctx`` (keys: solc_binary, binaries,
+    full_binaries — all picklable) runs Pass 1 across a spawn-based process
+    pool: workers write the shared cache; the parent then loads it. Cache hits
+    are detected up front, so the pool only sees genuinely missing contracts
+    and the second ablation arm degenerates to fast cache reads. With
+    ``extract_jobs <= 1`` (or no ctx) the original serial loop runs unchanged.
 
     ``pca_fit_sample`` bounds the snippets embedded to FIT the PCA (0 = all).
     At full-corpus scale, embedding every unique snippet exhausts RAM; a 64-dim
@@ -293,30 +359,82 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     raws: dict[str, tuple[RawGraph, RawGraph]] = {}
     failed: list[tuple[str, str]] = []
     n = len(plan.items)
-    for i, it in enumerate(plan.items):
-        h = content_hash(_read(it.path))
-        cache = out / "raw" / f"{h}.json"
+
+    def _load_cache(cache: Path):
         try:
-            ast = cfg = None
-            if cache.exists():
-                try:
-                    d = json.loads(cache.read_text(encoding="utf-8"))
-                    ast, cfg = RawGraph.from_dict(d["ast"]), RawGraph.from_dict(d["cfg"])
-                except Exception:
-                    ast = cfg = None    # partial/corrupt cache (e.g. Ctrl-C) -> re-extract
-            if ast is None:
-                with _time_limit(extract_timeout):
-                    ast, cfg = extract_fn(it.path)
-                tmp = cache.with_name(cache.name + ".tmp")   # atomic -> safe to interrupt
-                tmp.write_text(json.dumps({"ast": ast.to_dict(), "cfg": cfg.to_dict()}),
-                               encoding="utf-8")
-                tmp.replace(cache)
-            raws[it.cid] = (ast, cfg)
-        except Exception as exc:               # skip & log; never guess
-            failed.append((it.cid, str(exc)))
-        if (i + 1) % 25 == 0 or (i + 1) == n:
-            print(f"  extracted {i + 1}/{n} (ok {len(raws)}, failed {len(failed)})",
-                  flush=True)
+            d = json.loads(cache.read_text(encoding="utf-8"))
+            return RawGraph.from_dict(d["ast"]), RawGraph.from_dict(d["cfg"])
+        except Exception:
+            return None                    # partial/corrupt cache -> re-extract
+
+    hashes = {it.cid: content_hash(_read(it.path)) for it in plan.items}
+
+    if extract_jobs > 1 and extract_ctx is not None:
+        # Parallel path: workers fill the cache; the parent loads it afterwards.
+        import multiprocessing as mp
+
+        todo: dict[str, tuple[str, str]] = {}      # hash -> (cid, path); dedup by hash
+        for it in plan.items:
+            cache = out / "raw" / f"{hashes[it.cid]}.json"
+            if not cache.exists() and hashes[it.cid] not in todo:
+                todo[hashes[it.cid]] = (it.cid, it.path)
+        tasks = [(cid, path, str(out / "raw" / f"{h}.json"), float(extract_timeout))
+                 for h, (cid, path) in sorted(todo.items())]
+        print(f"pass 1 (parallel x{extract_jobs}): {len(tasks)} to extract, "
+              f"{n - len(tasks)} items already cached or shared", flush=True)
+
+        worker_errors: dict[str, str] = {}
+        if tasks:
+            ctx = mp.get_context("spawn")          # never fork a CUDA parent
+            with ctx.Pool(processes=extract_jobs, initializer=_pp_init,
+                          initargs=(extract_ctx.get("solc_binary"),
+                                    extract_ctx.get("binaries") or {},
+                                    extract_ctx.get("full_binaries") or {}),
+                          maxtasksperchild=25       # recycle: bound Slither leaks
+                          ) as pool:
+                done = 0
+                for cid, err in pool.imap_unordered(_pp_extract, tasks, chunksize=4):
+                    done += 1
+                    if err is not None:
+                        worker_errors[cid] = err
+                    if done % 200 == 0 or done == len(tasks):
+                        print(f"  extracted {done}/{len(tasks)} "
+                              f"(failed {len(worker_errors)})", flush=True)
+
+        for it in plan.items:                      # load everything from the cache
+            if it.cid in raws:
+                continue
+            cache = out / "raw" / f"{hashes[it.cid]}.json"
+            got = _load_cache(cache) if cache.exists() else None
+            if got is not None:
+                raws[it.cid] = got
+            else:
+                failed.append((it.cid, worker_errors.get(it.cid, "no cache produced")))
+    else:
+        # Serial path - UNCHANGED semantics (tests, smoke runs, cache-only arm).
+        for i, it in enumerate(plan.items):
+            h = hashes[it.cid]
+            cache = out / "raw" / f"{h}.json"
+            try:
+                ast = cfg = None
+                if cache.exists():
+                    got = _load_cache(cache)
+                    if got is not None:
+                        ast, cfg = got
+                if ast is None:
+                    with _time_limit(extract_timeout):
+                        ast, cfg = extract_fn(it.path)
+                    tmp = cache.with_name(cache.name + ".tmp")   # atomic
+                    tmp.write_text(json.dumps({"ast": ast.to_dict(),
+                                               "cfg": cfg.to_dict()}),
+                                   encoding="utf-8")
+                    tmp.replace(cache)
+                raws[it.cid] = (ast, cfg)
+            except Exception as exc:               # skip & log; never guess
+                failed.append((it.cid, str(exc)))
+            if (i + 1) % 25 == 0 or (i + 1) == n:
+                print(f"  extracted {i + 1}/{n} (ok {len(raws)}, failed {len(failed)})",
+                      flush=True)
     print(f"pass 1 done: {len(raws)}/{n} extracted, {len(failed)} failed", flush=True)
 
     # The ablation: strip data-flow edges from the cached CFGs. Node features and
@@ -371,7 +489,7 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
             "cfg_x": torch.from_numpy(cx), "cfg_edge_index": torch.from_numpy(ci),
             "y": torch.tensor(it.y, dtype=torch.float),
         }
-        rp = out / "records" / f"{content_hash(_read(it.path))}.pt"
+        rp = out / "records" / f"{hashes[it.cid]}.pt"
         torch.save(record, rp)
         indices[it.split].append({"id": it.cid, "path": str(rp)})
 
@@ -400,6 +518,7 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
         "degraded_cfgs": int(n_degraded),
         "pca_fit_snippets": len(train_snippets),
         "pca_fit_snippets_available": n_all,
+        "extract_jobs": int(extract_jobs),
     }
     (out / "build_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
