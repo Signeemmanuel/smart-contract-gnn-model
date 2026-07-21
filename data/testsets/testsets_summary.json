@@ -1,0 +1,27 @@
+{
+  "seed": 42,
+  "test_a": {
+    "contracts": 1500,
+    "positives_per_class": {
+      "reentrancy": 326,
+      "access_control": 146,
+      "arithmetic": 314,
+      "unchecked_calls": 264,
+      "dos": 199
+    },
+    "negatives": 1000,
+    "below_minimum": {},
+    "target_per_class": 100
+  },
+  "test_b": {
+    "contracts": 142,
+    "positives_per_class": {
+      "reentrancy": 31,
+      "access_control": 18,
+      "arithmetic": 15,
+      "unchecked_calls": 52,
+      "dos": 6
+    }
+  },
+  "curated_hashes_excluded_from_test_a": 142
+}
