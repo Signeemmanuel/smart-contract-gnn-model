@@ -251,21 +251,17 @@ stage_durieux() {
 }
 
 stage_localise() {
-  # An ensemble has no single checkpoint to explain, so localisation always runs
-  # on the best SINGLE model. If the ensemble is the overall winner, say so in
-  # the write-up and localise the best single: that is the honest reading.
-  local w; w="$(best_single)" || die "run 'train' first."
-  local overall; overall="$(winner)"
-  [ "$w" = "$overall" ] || say "LOCALISE - overall winner is $overall (an ensemble); \
-localising the best single model instead: $w"
-  local cfg="configs/${w%_df}.yaml"         # gcn_df -> gcn.yaml
-  say "LOCALISE - GNNExplainer on $w, exact and tolerant, on Test B"
-  for t in 0 1 2; do
-    python scripts/localise_eval.py --merge max --tolerance "$t" \
-      --checkpoint "$RUNS/$w/best_model.pt" --config "$cfg" \
-      --out "$RUNS/$w/localisation_tol${t}.json" \
-      || warn "localisation (tolerance $t) failed; v1 numbers stand."
-  done
+  # Localisation is a benchmark axis, not a winner-only check: EVERY trained
+  # single model is explained (GNNExplainer, merge-max, top-1/3/5/10), with all
+  # tolerances (0/1/2) scored from the same seeded passes. Ensembles carry no
+  # single checkpoint, so they have no computational graph for the explainer to
+  # perturb and are skipped by construction; the write-up says so.
+  [ -f "$RUNS/results.json" ] || die "run 'train' first."
+  say "LOCALISE - GNNExplainer benchmark over ALL single models, Test B, top-1/3/5/10"
+  python scripts/localise_eval.py --all-models --runs-dir "$RUNS" \
+    --repeats 5 --device cuda --merge max \
+    --benchmark-out "$ARTIFACTS/localisation_benchmark.json" \
+    || warn "localisation benchmark failed; v1 numbers stand."
   maybe_sync
 }
 
