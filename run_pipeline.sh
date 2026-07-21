@@ -61,12 +61,15 @@ SB_CMD="${SB_CMD:-python -m sb}"                  # SmartBugs 2.x has no console
 # sb/docker.py would shadow the real Docker SDK.
 export PYTHONPATH="${SMARTBUGS}:${PYTHONPATH:-.}"
 
-# Off-instance sync (section 5: the disk is ephemeral). Set SYNC_REPO to a
-# private HF dataset repo id and export a FRESH HF_TOKEN; every long stage then
-# pushes its artefacts off-box when it finishes. The continuous loop for DURING
-# long runs is separate:  tmux new -s sync -d \
-#   'python scripts/sync_offbox.py --repo-id $SYNC_REPO --interval 15 2>&1 | tee -a sync.log'
-SYNC_REPO="${SYNC_REPO:-}"
+# Off-instance sync (section 5: the disk is ephemeral). The store repo is a
+# CONSTANT: edit this line to change stores. Deliberately NOT env-overridable —
+# a stale SYNC_REPO export in a shell once silently redirected a sync to a
+# retired repo, so the code is the single source of truth. A FRESH HF_TOKEN
+# must still be exported (the token itself is never hardcoded). Every long
+# stage pushes its artefacts off-box when it finishes; the continuous loop for
+# DURING long runs is:  tmux new -s sync -d \
+#   'python scripts/sync_offbox.py --interval 15 2>&1 | tee -a sync.log'
+SYNC_REPO="Signeemmanuel/scgnn-v2-store"
 
 cd "$REPO"
 say() { printf "\n\033[1;36m==> %s\033[0m\n" "$*"; }
@@ -304,6 +307,34 @@ bundle is the best single model, $w. Report both."
   maybe_sync
 }
 
+# archive: one-object off-box backup of an immutable bulk tree.
+# Per-file sync does not survive contact with >500k tiny files (thousands of
+# Hub commits, 504s — observed on the full sb_results tree), so finished trees
+# are tarred once and uploaded as a single object instead. Default source is
+# data/sb_results; override with ARCHIVE_SRC=<dir>. Skips re-tarring when
+# today's archive already exists, so the stage is safely re-runnable after an
+# interrupted upload.
+stage_archive() {
+  local src="${ARCHIVE_SRC:-data/sb_results}"
+  say "ARCHIVE - ${src} -> single object in ${SYNC_REPO}/archives/"
+  [ -d "$src" ] || die "no such directory: $src"
+  [ -n "${HF_TOKEN:-}" ] || die "export HF_TOKEN first (never hardcode it)."
+  command -v zstd >/dev/null 2>&1 || apt-get install -y zstd
+  local name; name="$(basename "$src")_$(date +%Y%m%d).tar.zst"
+  local out="/root/${name}"
+  if [ -f "$out" ]; then
+    say "ARCHIVE - ${out} already exists; skipping tar, proceeding to upload"
+  else
+    tar -I 'zstd -T0 -3' -cf "$out" -C "$(dirname "$src")" "$(basename "$src")" \
+      || die "tar failed; archive not uploaded."
+  fi
+  ls -lh "$out"
+  hf upload "$SYNC_REPO" "$out" "archives/${name}" --repo-type dataset \
+    || die "upload failed; the archive remains at ${out} - re-run this stage."
+  say "ARCHIVE - stored as ${SYNC_REPO}/archives/${name}"
+  warn "restore: hf download ${SYNC_REPO} archives/${name} --repo-type dataset --local-dir /tmp && tar -I zstd -xf /tmp/archives/${name} -C data"
+}
+
 ALL=(setup tag data tools label freeze build train durieux localise figures release)
 [ $# -eq 0 ] && { echo "usage: bash run_pipeline.sh <stage|all> [...]"; echo "stages: ${ALL[*]}"; exit 1; }
 [ "$1" = "all" ] && set -- "${ALL[@]}"
@@ -314,8 +345,8 @@ for stage in "$@"; do
     tools) stage_tools ;; label) stage_label ;; freeze) stage_freeze ;;
     build) stage_build ;; train) stage_train ;; durieux) stage_durieux ;;
     localise) stage_localise ;; figures) stage_figures ;; release) stage_release ;;
-    sync) maybe_sync ;;
-    *) die "unknown stage '$stage'. Valid: ${ALL[*]}, sync (or 'all')." ;;
+    sync) maybe_sync ;; archive) stage_archive ;;
+    *) die "unknown stage '$stage'. Valid: ${ALL[*]}, sync, archive (or 'all')." ;;
   esac
 done
 say "DONE: $*"

@@ -25,16 +25,16 @@ resume bounds the loss window to re-runnable work.
 
 Auth: the ``HF_TOKEN`` environment variable (export it in the shell or via a
 non-committed .env; NEVER commit the token). The repo is created private on
-first run.
+first run. The destination repo is the DEFAULT_REPO constant below — edit the
+constant to change stores; it is deliberately not read from the environment.
 
 Usage
 -----
     # one-shot
-    python scripts/sync_offbox.py --repo-id <user>/scgnn-v2-artefacts --once
+    python scripts/sync_offbox.py --once
 
     # continuous, under tmux, while labelling/training runs elsewhere
-    tmux new -s sync -d 'python scripts/sync_offbox.py \
-        --repo-id <user>/scgnn-v2-artefacts --interval 15 2>&1 | tee -a sync.log'
+    tmux new -s sync -d 'python scripts/sync_offbox.py --interval 15 2>&1 | tee -a sync.log'
 """
 from __future__ import annotations
 
@@ -46,6 +46,11 @@ import tempfile
 import time
 from pathlib import Path
 
+# The store repo is a CONSTANT: edit this line to change stores. Deliberately
+# not read from the environment — a stale SYNC_REPO export once silently
+# redirected a sync to a retired repo. --repo-id remains for exceptional
+# one-off use (e.g. restoring from an old store).
+DEFAULT_REPO = "Signeemmanuel/scgnn-v2-store"
 DEFAULT_PATHS = ["data/processed", "data/testsets", "runs", "artifacts"]
 
 
@@ -90,8 +95,9 @@ def sync_once(api, repo_id: str, paths: list[str], ledger: str | None) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repo-id", required=True,
-                    help="Private HF dataset repo, e.g. <user>/scgnn-v2-artefacts.")
+    ap.add_argument("--repo-id", default=DEFAULT_REPO,
+                    help=f"Private HF dataset repo (default: {DEFAULT_REPO}; "
+                         "override with this flag or the SYNC_REPO env var).")
     ap.add_argument("--paths", nargs="+", default=DEFAULT_PATHS,
                     help=f"Paths to sync (default: {DEFAULT_PATHS}).")
     ap.add_argument("--ledger", default="data/labelling_ledger.sqlite",
