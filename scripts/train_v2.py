@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
 """v2 training + evaluation matrix (Workstreams D, E, F, G).
 
-Trains the six single runs, builds the two ensembles, evaluates everything on
+Trains the eight single runs, builds the two ensembles, evaluates everything on
 BOTH frozen test sets, and emits results.json ready for the artifact generator.
 
-    | Run | Encoder   | Data-flow |
-    |-----|-----------|-----------|
-    | 1   | gcn       | no        |
-    | 2   | gcn_df    | yes       |
-    | 3   | sage      | no        |
-    | 4   | sage_df   | yes       |
-    | 5   | gatv2     | no        |
-    | 6   | gatv2_df  | yes       |
-    | E1  | ensemble      (1+3+5) |
-    | E2  | ensemble_df   (2+4+6) |
+    | Run | Encoder    | Data-flow |
+    |-----|------------|-----------|
+    | 1   | gcn        | no        |
+    | 2   | gcn_df     | yes       |
+    | 3   | sage       | no        |
+    | 4   | sage_df    | yes       |
+    | 5   | gatv2      | no        |
+    | 6   | gatv2_df   | yes       |
+    | 7   | hybrid     | no        |
+    | 8   | hybrid_df  | yes       |
+    | E1  | ensemble      (1+3+5)  |
+    | E2  | ensemble_df   (2+4+6)  |
+
+``hybrid`` is the BugSweeper-inspired two-stage SAGE->GATv2 encoder (Lee et
+al., 2025; see configs/hybrid.yaml for the adaptation notes). It is reported
+everywhere the other singles are, but the ensembles remain the PRE-SPECIFIED
+GCN + GraphSAGE + GATv2 (Workstream E): membership is pinned in
+ENSEMBLE_MEMBERS, not inferred from whatever happened to train.
 
 Reproducibility (non-negotiable #2): every run writes its resolved config, the
 git commit hash, and the installed package versions next to its checkpoint.
@@ -43,7 +51,10 @@ import numpy as np
 from scgnn.common.seeds import set_seed
 from scgnn.schema import FLAWS
 
-ENCODERS = ["gcn", "sage", "gatv2"]
+ENCODERS = ["gcn", "sage", "gatv2", "hybrid"]
+# Workstream E is pre-specified: the ensemble is GCN + GraphSAGE + GATv2.
+# Additional encoders (the hybrid) are evaluated as singles but never join.
+ENSEMBLE_MEMBERS = ["gcn", "sage", "gatv2"]
 
 
 def git_hash() -> str:
@@ -168,7 +179,7 @@ def main() -> int:
 
                 cfg = load_config(str(Path(args.configs) / f"{enc}.yaml"))
                 cfg["in_dim"] = in_dim
-                cfg["conv"] = enc                    # gatv2 needs the conv name set
+                cfg["conv"] = enc                    # gatv2/hybrid need the conv name set
                 cfg["seed"] = seed
                 if args.epochs:
                     cfg["epochs"] = args.epochs
@@ -209,7 +220,11 @@ def main() -> int:
                       f"B {res['test_b']['macro']['f1']:.3f}")
 
             # ---- ensemble for this arm (Workstream E) ----
-            runs = list(cached[(seed, arm)])
+            # Membership is PINNED to the pre-specified GCN+SAGE+GATv2 (the
+            # hybrid is a single, never an ensemble member), and filtered to
+            # what actually trained so one failed run degrades rather than dies.
+            expected = [m if arm == "nodf" else f"{m}_df" for m in ENSEMBLE_MEMBERS]
+            runs = [r for r in expected if r in cached[(seed, arm)]]
             if len(runs) >= 2:
                 name = "ensemble" if arm == "nodf" else "ensemble_df"
                 tag = name if len(args.seeds) == 1 else f"{name}_s{seed}"

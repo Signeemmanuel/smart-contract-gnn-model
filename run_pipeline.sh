@@ -219,7 +219,7 @@ stage_build() {
 }
 
 stage_train() {
-  say "TRAIN - six-run matrix (gcn/sage/gatv2 x with/without data-flow) + 2 ensembles"
+  say "TRAIN - eight-run matrix (gcn/sage/gatv2/hybrid x with/without data-flow) + 2 ensembles"
   python scripts/train_v2.py \
     --data-nodf "$DATA_NODF" --data-df "$DATA_DF" \
     --configs configs --out "$RUNS" --seeds 42 \
@@ -280,7 +280,7 @@ p = pathlib.Path("$ARTIFACTS") / "durieux_matrix.json"
 if p.exists():
     durieux = json.loads(p.read_text())
 out = emit_all("$RUNS/results.json", "$ARTIFACTS",
-               encoders=["gcn", "sage", "gatv2"], durieux=durieux)
+               encoders=["gcn", "sage", "gatv2", "hybrid"], durieux=durieux)
 print("best model:", out["best_model"])
 print("tables:", out["tables"])
 print("figures:", out["figures"])

@@ -1,6 +1,6 @@
-"""Swappable single-stage GNN encoder (GCN / GraphSAGE / GAT / GATv2).
+"""Swappable GNN encoder (GCN / GraphSAGE / GAT / GATv2 / hybrid).
 
-Status: needs torch + torch_geometric; py_compiled here, run on the Studio.
+Status: needs torch + torch_geometric; py_compiled here, run on the GPU box.
 
 Three message-passing layers then mean pooling, exactly as fixed in the spec.
 
@@ -12,8 +12,23 @@ layer after the non-linearity. GAT itself is retained so the v1 results remain
 reproducible for the before/after table, but it is retired from the active model
 matrix and from the ensemble.
 
-Both attention variants expose the first layer's attention weights so the
-explanation component can reuse them as a cheap secondary signal.
+**hybrid** is a two-stage encoder adapted from BugSweeper (Lee et al., 2025,
+arXiv:2512.09385, AAAI 2026): GraphSAGE stages first ("broad structural
+context" / noise filtering), then an attention stage for high-level reasoning.
+Their ablation found SAGE followed by attention the strongest configuration.
+Two deliberate deviations from the paper, both documented for the write-up:
+(1) it runs inside this project's contract-level DualGNN over AST + CFG(+DF)
+graphs with five classes, NOT over function-level FLAG graphs with three
+classes, so it is an architecture-transfer ablation rather than a
+reproduction; and (2) the attention stage uses GATv2 rather than GAT,
+consistent with this project's retirement of static attention. With
+``layers=3`` the split is 2 SAGE layers + 1 multi-head GATv2 layer whose
+``hid`` is divided across heads, so the parameter budget stays comparable to
+the single-stage encoders.
+
+Attention-bearing encoders expose their attention layer's weights so the
+explanation component can reuse them as a cheap secondary signal: layer 0 for
+gat/gatv2, the final (attention) layer for hybrid.
 """
 
 from __future__ import annotations
@@ -26,20 +41,35 @@ from torch_geometric.nn import (
 
 CONV = {"gcn": GCNConv, "sage": SAGEConv, "gat": GATConv, "gatv2": GATv2Conv}
 ATTENTION_CONVS = ("gat", "gatv2")
+HYBRID = "hybrid"                     # two-stage SAGE -> GATv2 (Lee et al., 2025)
+KNOWN_CONVS = tuple(CONV) + (HYBRID,)
 
 
 class Encoder(nn.Module):
     def __init__(self, in_dim: int, hid: int = 128, conv: str = "sage",
                  layers: int = 3, heads: int = 4, dropout: float = 0.5) -> None:
         super().__init__()
-        if conv not in CONV:
-            raise ValueError(f"unknown conv {conv!r}; expected one of {list(CONV)}")
+        if conv not in KNOWN_CONVS:
+            raise ValueError(f"unknown conv {conv!r}; expected one of {list(KNOWN_CONVS)}")
         self.conv_name = conv
-        Conv = CONV[conv]
         self.convs = nn.ModuleList()
+        self.att_idx: int | None = None    # which layer yields attention weights
         dims = [in_dim] + [hid] * layers
-        for i in range(layers):
-            if conv in ATTENTION_CONVS:
+
+        if conv == HYBRID:
+            # Stage 1: SAGE layers (all but the last). Stage 2: one multi-head
+            # GATv2 layer with `hid` split across heads (concat back to `hid`),
+            # mirroring the budget rule used for the pure attention encoders.
+            if layers < 2:
+                raise ValueError("hybrid needs layers >= 2 (SAGE stage + attention stage)")
+            for i in range(layers - 1):
+                self.convs.append(SAGEConv(dims[i], dims[i + 1]))
+            self.convs.append(GATv2Conv(hid, hid // heads, heads=heads,
+                                        dropout=dropout))
+            self.att_idx = layers - 1
+        elif conv in ATTENTION_CONVS:
+            Conv = CONV[conv]
+            for i in range(layers):
                 # First layer is multi-head with `hid` split across heads, so the
                 # concatenated output width stays exactly `hid` (same parameter
                 # budget as GCN/SAGE). Later layers are single-head. Attention is
@@ -49,10 +79,14 @@ class Encoder(nn.Module):
                                            dropout=dropout))
                 else:
                     self.convs.append(Conv(hid, hid, heads=1, dropout=dropout))
-            else:
+            self.att_idx = 0
+        else:
+            Conv = CONV[conv]
+            for i in range(layers):
                 self.convs.append(Conv(dims[i], dims[i + 1]))
+
         self.drop = nn.Dropout(dropout)
-        self.last_attention = None  # (edge_index, alpha) from the first attention layer
+        self.last_attention = None  # (edge_index, alpha) from the attention layer
 
     def forward(self, x, edge_index, batch, size: int | None = None):
         """Encode a (batched) graph and mean-pool to one vector per graph.
@@ -66,7 +100,7 @@ class Encoder(nn.Module):
         """
         self.last_attention = None
         for i, conv in enumerate(self.convs):
-            if self.conv_name in ATTENTION_CONVS and i == 0:
+            if self.att_idx is not None and i == self.att_idx:
                 x, att = conv(x, edge_index, return_attention_weights=True)
                 self.last_attention = att  # (edge_index, alpha)
             else:
