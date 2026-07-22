@@ -360,6 +360,14 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     failed: list[tuple[str, str]] = []
     n = len(plan.items)
 
+    # Items are keyed by (split, cid), NEVER by bare cid: Curated and Wild both
+    # name contracts by address, and the same address can exist in both with
+    # DIFFERENT content (Curated contracts are modified wild originals). Keying
+    # by cid let a train twin's hash overwrite a Test B entry, silently encoding
+    # six expert test contracts from the wrong graphs with the wrong labels.
+    def item_key(it) -> str:
+        return f"{it.split}:{it.cid}"
+
     def _load_cache(cache: Path):
         try:
             d = json.loads(cache.read_text(encoding="utf-8"))
@@ -367,7 +375,7 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
         except Exception:
             return None                    # partial/corrupt cache -> re-extract
 
-    hashes = {it.cid: content_hash(_read(it.path)) for it in plan.items}
+    hashes = {item_key(it): content_hash(_read(it.path)) for it in plan.items}
 
     if extract_jobs > 1 and extract_ctx is not None:
         # Parallel path: workers fill the cache; the parent loads it afterwards.
@@ -375,9 +383,10 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
 
         todo: dict[str, tuple[str, str]] = {}      # hash -> (cid, path); dedup by hash
         for it in plan.items:
-            cache = out / "raw" / f"{hashes[it.cid]}.json"
-            if not cache.exists() and hashes[it.cid] not in todo:
-                todo[hashes[it.cid]] = (it.cid, it.path)
+            h = hashes[item_key(it)]
+            cache = out / "raw" / f"{h}.json"
+            if not cache.exists() and h not in todo:
+                todo[h] = (it.cid, it.path)
         tasks = [(cid, path, str(out / "raw" / f"{h}.json"), float(extract_timeout))
                  for h, (cid, path) in sorted(todo.items())]
         print(f"pass 1 (parallel x{extract_jobs}): {len(tasks)} to extract, "
@@ -402,18 +411,19 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
                               f"(failed {len(worker_errors)})", flush=True)
 
         for it in plan.items:                      # load everything from the cache
-            if it.cid in raws:
+            key = item_key(it)
+            if key in raws:
                 continue
-            cache = out / "raw" / f"{hashes[it.cid]}.json"
+            cache = out / "raw" / f"{hashes[key]}.json"
             got = _load_cache(cache) if cache.exists() else None
             if got is not None:
-                raws[it.cid] = got
+                raws[key] = got
             else:
-                failed.append((it.cid, worker_errors.get(it.cid, "no cache produced")))
+                failed.append((key, worker_errors.get(it.cid, "no cache produced")))
     else:
         # Serial path - UNCHANGED semantics (tests, smoke runs, cache-only arm).
         for i, it in enumerate(plan.items):
-            h = hashes[it.cid]
+            h = hashes[item_key(it)]
             cache = out / "raw" / f"{h}.json"
             try:
                 ast = cfg = None
@@ -429,9 +439,9 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
                                                "cfg": cfg.to_dict()}),
                                    encoding="utf-8")
                     tmp.replace(cache)
-                raws[it.cid] = (ast, cfg)
+                raws[item_key(it)] = (ast, cfg)
             except Exception as exc:               # skip & log; never guess
-                failed.append((it.cid, str(exc)))
+                failed.append((item_key(it), str(exc)))
             if (i + 1) % 25 == 0 or (i + 1) == n:
                 print(f"  extracted {i + 1}/{n} (ok {len(raws)}, failed {len(failed)})",
                       flush=True)
@@ -450,7 +460,8 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
 
     # Fit on TRAIN only.
     print("fitting train-only feature vocab + PCA ...", flush=True)
-    train_ids = [it.cid for it in plan.items if it.split == "train" and it.cid in raws]
+    train_ids = [item_key(it) for it in plan.items
+                 if it.split == "train" and item_key(it) in raws]
     train_graphs = [g for cid in train_ids for g in raws[cid]]
 
     all_snips = sorted({s for cid in train_ids for g in raws[cid] for s in g.snippets})
@@ -479,9 +490,10 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
     print("encoding all splits -> records ...", flush=True)
     indices: dict[str, list[dict]] = {s: [] for s in splits}
     for it in plan.items:
-        if it.cid not in raws:
+        key = item_key(it)
+        if key not in raws:
             continue
-        ast, cfg = raws[it.cid]
+        ast, cfg = raws[key]
         ax, ai = encoder.encode_array(ast)
         cx, ci = encoder.encode_array(cfg)
         record = {
@@ -489,7 +501,7 @@ def materialise(plan: SplitPlan, extract_fn, embedder, out_dir: str, *,
             "cfg_x": torch.from_numpy(cx), "cfg_edge_index": torch.from_numpy(ci),
             "y": torch.tensor(it.y, dtype=torch.float),
         }
-        rp = out / "records" / f"{hashes[it.cid]}.pt"
+        rp = out / "records" / f"{hashes[key]}.pt"
         torch.save(record, rp)
         indices[it.split].append({"id": it.cid, "path": str(rp)})
 
