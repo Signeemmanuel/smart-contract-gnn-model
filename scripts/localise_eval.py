@@ -10,14 +10,9 @@ ranked predicted lines against the gold lines with the proposal's metric:
 
 k in {1, 3, 5, 10}. GNNExplainer is stochastic (random mask initialisation),
 so every run is seeded (pass r uses seed+r) and `--repeats N` reports
-`mean +/- std` — the figure to cite. `--merge` selects how the two branches'
-line scores are combined:
-
-    max     line takes its best score across branches, ranked globally (default)
-    concat  every AST line before any CFG line (the pre-fix behaviour)
-    both    run a paired ablation: one explainer run per contract feeds BOTH
-            rules, so the arms differ only in the combination, never in the
-            importances — the honest before/after.
+`mean +/- std` — the figure to cite. Branch combination follows the
+canonical merged-max rule (each line takes its best normalised score across the
+AST and CFG branches, ranked globally); the explainer implements it internally.
 
 Reuses the build caches (`records/<hash>.pt`, `raw/<hash>.json`); nothing is
 re-extracted or re-embedded. The v2 test index (``test_b_index.json``) is used
@@ -100,13 +95,11 @@ def _run_pass(model, targets, gold_map, processed: Path, device: str,
     import torch
     from torch_geometric.data import Data
 
-    from scgnn.explain.explainer import explain_line_scores
+    from scgnn.explain.explainer import explain_lines
     from scgnn.explain.attention import attention_lines
-    from scgnn.explain.localise import concat_line_scores, merge_line_scores
     from scgnn.extraction.graph_types import RawGraph
     from scgnn.schema import FLAWS, display_name
 
-    combine = {"max": merge_line_scores, "concat": concat_line_scores}
     out: dict[str, list[dict]] = {m: [] for m in modes}
     primary = "max" if "max" in modes else modes[-1]
     total = len(targets)
@@ -142,20 +135,21 @@ def _run_pass(model, targets, gold_map, processed: Path, device: str,
                 model(ast_data, cfg_data)
             ast_lines, _ua = attention_lines(model.ast, ast_raw.node_lines, k=k)
             cfg_lines, _uc = attention_lines(model.cfg, cfg_raw.node_lines, k=k)
+            # interleave the two branches' attention lines, AST first
+            inter = [x for pair in zip(ast_lines, cfg_lines) for x in pair]
+            inter += ast_lines[len(cfg_lines):] + cfg_lines[len(ast_lines):]
             for m in modes:
-                if m == "concat":
-                    merged[m].extend((ast_lines + cfg_lines)[: 2 * k])
-                else:  # max: interleave, AST first
-                    inter = [x for pair in zip(ast_lines, cfg_lines) for x in pair]
-                    inter += ast_lines[len(cfg_lines):] + cfg_lines[len(ast_lines):]
-                    merged[m].extend(inter[: 2 * k])
+                merged[m].extend(inter[: 2 * k])
         else:
+            # explain_lines runs GNNExplainer per branch internally, normalises,
+            # merges by maximum and returns the ranked line list (the canonical
+            # merge-max rule); one call per annotated flaw.
             for j in positive:
-                ast_s, cfg_s, _unmapped = explain_line_scores(
+                lines, _unmapped = explain_lines(
                     model, ast_data, cfg_data, j,
-                    ast_raw.node_lines, cfg_raw.node_lines, epochs=epochs)
+                    ast_raw.node_lines, cfg_raw.node_lines, k=k, epochs=epochs)
                 for m in modes:
-                    merged[m].extend(combine[m](ast_s, cfg_s, k=k))
+                    merged[m].extend(lines)
 
         flaws = [FLAWS[j] for j in positive]
         for m in modes:
@@ -346,8 +340,11 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=5,
                     help="Seeded passes; reports mean +/- std when >1.")
     ap.add_argument("--seed", type=int, default=0, help="Base seed; pass r uses seed+r.")
-    ap.add_argument("--merge", choices=["max", "concat", "both"], default="max",
-                    help="Branch combination rule, or 'both' for a paired ablation.")
+    ap.add_argument("--merge", choices=["max"], default="max",
+                    help="Branch combination rule. The current explainer exposes "
+                         "the merged-max rule only (explain_lines merges the two "
+                         "branches internally); the concat arm of the v1 ablation "
+                         "is retired with it.")
     ap.add_argument("--method", choices=["gnnexplainer", "attention"], default="gnnexplainer",
                     help="Localisation method. 'gnnexplainer' (default) runs GNNExplainer "
                          "per flaw on any model. 'attention' reads the attention layer's "
@@ -365,8 +362,7 @@ def main() -> int:
     if args.all_models:
         return run_benchmark(Path(args.runs_dir), k=args.k, epochs=args.epochs,
                              repeats=args.repeats, base_seed=args.seed,
-                             device=args.device, merge=("max" if args.merge == "both"
-                                                        else args.merge),
+                             device=args.device, merge=args.merge,
                              benchmark_out=args.benchmark_out)
 
     import torch
@@ -395,7 +391,7 @@ def main() -> int:
     test_index = json.loads(_test_index_path(processed).read_text(encoding="utf-8"))
     gold_map = json.loads((processed / "curated_gold_lines.json").read_text(encoding="utf-8"))
     targets = [e for e in test_index if gold_map.get(e["id"])]
-    modes = ["concat", "max"] if args.merge == "both" else [args.merge]
+    modes = [args.merge]
     print(f"{len(test_index)} test contracts; {len(targets)} carry gold lines "
           f"(localisation targets)")
     print(f"merge={args.merge}  {args.repeats} seeded pass(es), base seed {args.seed}, "
@@ -442,15 +438,7 @@ def main() -> int:
 
     print("\n=== localisation accuracy (expert test split, n="
           f"{n}) ===")
-    if args.merge == "both":
-        print(f"  {'merge':<8}" + "".join(f"{'@' + str(k):<16}" for k in KS))
-        for m in modes:
-            cells = "".join(f"{mean[m][k]:.3f} \u00b1 {std[m][k]:.3f}   " for k in KS)
-            print(f"  {m:<8}{cells}")
-        dl = {k: mean['max'][k] - mean['concat'][k] for k in KS}
-        delta_label = "\u0394(max-concat)"
-        print(f"  {delta_label}:  " + "  ".join(f"@{k}={dl[k]:+.3f}" for k in KS))
-    else:
+    if True:
         m = modes[0]
         for k in KS:
             if args.repeats > 1:
@@ -485,9 +473,6 @@ def main() -> int:
         "passes": per_pass,
         "per_contract": per_contract,
     }
-    if args.merge == "both":
-        report["delta_max_minus_concat"] = {
-            str(k): round(mean["max"][k] - mean["concat"][k], 4) for k in KS}
     suffix = args.merge if args.method == "gnnexplainer" else f"{args.method}_{args.merge}"
     outp = args.out or str(processed / f"localisation_report_{suffix}.json")
     Path(outp).write_text(json.dumps(report, indent=2), encoding="utf-8")

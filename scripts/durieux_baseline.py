@@ -22,6 +22,12 @@ the union scores poorly against expert ground truth, that is the ceiling our
 models are learning towards, and it explains the Test A / Test B gap far better
 than any model-side argument.
 
+Alignment: the trained models can only predict for contracts the build could
+represent as graphs (141 of the 142 in the frozen manifest). The matrix is
+therefore evaluated on the ENCODED subset for every row, tools included, so all
+detectors share one denominator; the excluded contract is counted and printed,
+never silently dropped.
+
 Pipeline position:
     freeze_testsets.py -> [THIS, needs only Test B + SmartBugs] -> artifacts
 
@@ -55,16 +61,22 @@ TOOLS = ["slither", "mythril", "securify", "osiris"]
 # ------------------------------------------------------------------ run tools
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run the four tools over the Test B contracts, resumably."""
+    """Run the four tools over the Test B contracts, resumably.
+
+    Uses the corpus orchestrator's machinery (ledger, results template, on-disk
+    output verification), so the same guarantees hold here: exit 0 without a
+    result.json is recorded as ``no_output`` and retried, never trusted. Worker
+    exceptions are surfaced, not swallowed: a run that does nothing dies loudly.
+    """
     sys.path.insert(0, str(Path(__file__).parent))
-    from label_orchestrator import Ledger, TOOLS as ORCH_TOOLS, hash_file, run_task
+    from label_orchestrator import Ledger, run_task
     import concurrent.futures as cf
     import time
 
     from training.data.testsets import read_manifest
 
     rows = read_manifest(Path(args.testsets) / "test_b.csv")
-    print(f"Test B: {len(rows)} contracts x {len(ORCH_TOOLS)} tools")
+    print(f"Test B: {len(rows)} contracts x {len(TOOLS)} tools")
 
     led = Ledger(args.ledger)
     work = [(r["contract_id"], r["path"], r["chash"]) for r in rows]
@@ -75,28 +87,38 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not tasks:
         print("all tasks complete.")
         return 0
-    print(f"{len(tasks)} tasks to run (workers={args.workers})")
+    print(f"{len(tasks)} tasks to run (workers={args.workers}, "
+          f"timeout={args.timeout:g}s)")
 
     Path(args.results).mkdir(parents=True, exist_ok=True)
     sb_cmd = args.sb_cmd.split()
+    sb_timeout = max(30, int(args.timeout) - 30)
     t0 = time.time()
 
     def worker(t):
         cid, tool, path = t
-        status, secs = run_task(sb_cmd, tool, path, args.results, args.timeout)
+        status, secs = run_task(sb_cmd, tool, path, args.results,
+                                args.timeout, sb_timeout)
         led.update(cid, tool, status, secs)
         return status
 
     done = 0
+    counts: dict[str, int] = {}
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for _ in cf.as_completed([ex.submit(worker, t) for t in tasks]):
+        for fut in cf.as_completed([ex.submit(worker, t) for t in tasks]):
+            status = fut.result()          # surface worker exceptions loudly
+            counts[status] = counts.get(status, 0) + 1
             done += 1
             if done % 20 == 0 or done == len(tasks):
-                print(f"  {done}/{len(tasks)}", flush=True)
+                print(f"  {done}/{len(tasks)}  {counts}", flush=True)
 
     print(f"done in {(time.time()-t0)/60:.1f} min")
     s = led.summary()
     print("per-tool status:", {t: r for t, r in s["per_tool"].items()})
+    ok = sum(r["statuses"].get("ok", 0) for r in s["per_tool"].values())
+    if ok == 0:
+        sys.exit("ERROR: zero successful tool runs; the results tree is empty. "
+                 "Check SmartBugs (SB_CMD/PYTHONPATH) before building the matrix.")
     return 0
 
 
@@ -130,6 +152,31 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     from training.evaluate.metrics import apply_thresholds, tool_baseline_matrix
 
     rows = read_manifest(Path(args.testsets) / "test_b.csv")
+
+    # --- align everything to the ENCODED contracts (shared denominator) ---
+    # Model probabilities exist only for contracts the build could represent as
+    # graphs, in the order of the processed test_b index. Restrict the manifest
+    # (and therefore the tools) to that subset so every row of the matrix is
+    # scored on the same contracts; count and print the exclusions.
+    index_path = Path(args.model_index)
+    if index_path.exists():
+        encoded_ids = [e["id"] for e in
+                       json.loads(index_path.read_text(encoding="utf-8"))]
+        by_id = {r["contract_id"]: r for r in rows}
+        missing = [i for i in encoded_ids if i not in by_id]
+        if missing:
+            sys.exit(f"ERROR: {len(missing)} encoded ids absent from the manifest "
+                     f"(e.g. {missing[0]}); index and manifest disagree.")
+        excluded = [r["contract_id"] for r in rows if r["contract_id"] not in
+                    set(encoded_ids)]
+        rows = [by_id[i] for i in encoded_ids]   # manifest data, index ORDER
+        print(f"evaluating on {len(rows)} encoded contracts "
+              f"({len(excluded)} manifest contract(s) not representable as "
+              f"graphs, excluded from every row: {', '.join(excluded) or 'none'})")
+    else:
+        print(f"note: {index_path} not found; using the full manifest order "
+              f"(model rows must then match it exactly)")
+
     cids = [r["contract_id"] for r in rows]
     y_true = np.array([[int(r[f]) for f in FLAWS] for r in rows], dtype=int)
     print(f"Test B ground truth: {len(cids)} contracts, "
@@ -139,9 +186,13 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     for t in TOOLS:
         ran = int(tools[t].any(axis=1).sum())
         print(f"  {t:<10} flagged {ran} contracts")
+    if all(int(tools[t].sum()) == 0 for t in TOOLS):
+        sys.exit("ERROR: every tool flagged nothing; the results tree at "
+                 f"{args.results} is empty or mislaid. Run the 'run' subcommand "
+                 "first and check its per-tool status.")
 
-    # model predictions: {model: {"probs": [[...]], "thresholds": [...]}} keyed by
-    # the SAME contract order as the manifest.
+    # model predictions: {model: {"probs": [[...]], "thresholds": [...]}} in the
+    # processed test_b index order (which is exactly ``cids`` after alignment).
     models: dict[str, np.ndarray] = {}
     if args.model_probs:
         mp = json.loads(Path(args.model_probs).read_text(encoding="utf-8"))
@@ -149,8 +200,10 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             probs = np.asarray(blob["probs"], dtype=float)
             thr = blob.get("thresholds", [0.5] * N_FLAWS)
             if probs.shape[0] != len(cids):
-                sys.exit(f"ERROR: {name} has {probs.shape[0]} rows but Test B has "
-                         f"{len(cids)} contracts; the order must match the manifest.")
+                sys.exit(f"ERROR: {name} has {probs.shape[0]} rows but the "
+                         f"evaluation set has {len(cids)} contracts; pass the "
+                         f"matching --model-index for the build these "
+                         f"probabilities came from.")
             models[name] = apply_thresholds(probs, thr)
             print(f"  model {name:<12} flagged "
                   f"{int(models[name].any(axis=1).sum())} contracts")
@@ -238,7 +291,10 @@ def main() -> int:
     m.add_argument("--results", default="data/sb_testb")
     m.add_argument("--model-probs", default=None,
                    help="JSON: {model: {probs: [[...]], thresholds: [...]}} in the "
-                        "manifest's contract order.")
+                        "processed test_b index order.")
+    m.add_argument("--model-index", default="data/processed_df/test_b_index.json",
+                   help="The processed test_b index the model probabilities follow; "
+                        "the matrix is evaluated on exactly these contracts.")
     m.add_argument("--out", default="artifacts/v2")
     m.set_defaults(func=cmd_matrix)
 
