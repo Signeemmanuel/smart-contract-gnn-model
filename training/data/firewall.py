@@ -10,6 +10,12 @@ tests). Enforces in code what the proposal asks for in discipline:
 * Condition A trains only on the Curated *remainder*; the frozen test split is
   never trained on by any condition. ``assert_firewall`` fails loudly if a test
   hash ever appears in a training index.
+
+The canonical content hash is COMMENT-STRIPPED and whitespace-collapsed: two
+copies of a contract that differ only in comments or formatting hash equal, so
+a comment-edited duplicate of a test contract can never reach train/val.
+``scripts/label_orchestrator.py`` mirrors this function for pool dedup; keep
+the two in lockstep.
 """
 
 from __future__ import annotations
@@ -22,13 +28,73 @@ import numpy as np
 _WS = re.compile(r"\s+")
 
 
-def content_hash(source: str) -> str:
-    """Whitespace-normalised SHA-256 of contract source.
+def strip_comments(source: str) -> str:
+    """Remove // and /* */ comments from Solidity source, respecting strings.
 
-    Collapsing whitespace catches duplicates that differ only in formatting,
-    which is common across scraped corpora.
+    A small character-level state machine rather than a regex, so ``//`` inside
+    a string literal (``"https://example.com"``) is preserved and escaped
+    quotes inside strings do not end the string early. Block comments are
+    replaced by a single space so token boundaries survive
+    (``a/*x*/b`` -> ``a b``, not ``ab``). Pure.
     """
-    normalised = _WS.sub(" ", source).strip()
+    out: list[str] = []
+    i, n = 0, len(source)
+    in_line = in_block = False
+    quote: str | None = None
+    while i < n:
+        c = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if in_line:
+            if c == "\n":
+                in_line = False
+                out.append(c)
+            i += 1
+            continue
+        if in_block:
+            if c == "*" and nxt == "/":
+                in_block = False
+                out.append(" ")
+                i += 2
+                continue
+            i += 1
+            continue
+        if quote:
+            out.append(c)
+            if c == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def content_hash(source: str) -> str:
+    """Comment-stripped, whitespace-normalised SHA-256 of contract source.
+
+    Stripping comments and collapsing whitespace catches duplicates that differ
+    only in formatting or annotation, which is common across scraped corpora,
+    and closes the leak where a comment-edited copy of a frozen test contract
+    would otherwise hash differently and slip into training.
+    """
+    normalised = _WS.sub(" ", strip_comments(source)).strip()
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 

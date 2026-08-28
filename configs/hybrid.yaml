@@ -1,0 +1,22 @@
+# Inherit base.yaml and override the architecture only, so any difference
+# between runs is attributable to the architecture.
+#
+# hybrid: a two-stage encoder adapted from BugSweeper (Lee, Chung, Lee and
+# Moon, 2025, arXiv:2512.09385; AAAI 2026): GraphSAGE stages first, capturing
+# broad structural context and filtering syntactic noise, then an attention
+# stage for high-level reasoning over the refined representations. Their
+# ablation found SAGE followed by attention the strongest configuration.
+#
+# This is an architecture-transfer ablation, NOT a reproduction: BugSweeper
+# operates on function-level FLAG graphs with three classes, whereas this run
+# plugs the two-stage idea into the project's contract-level DualGNN over
+# AST + CFG(+DF) graphs with five classes, under the identical v2 protocol.
+# The attention stage uses GATv2 rather than the paper's GAT, consistent with
+# this project's retirement of static attention (Brody et al., 2022). With
+# layers: 3 the split is 2 SAGE layers + 1 GATv2 layer (heads: 4, hidden width
+# divided across heads), keeping the parameter budget comparable.
+#
+# The hybrid is reported everywhere the singles are, but is NOT an ensemble
+# member: Workstream E is pre-specified as GCN + GraphSAGE + GATv2.
+extends: base.yaml
+conv: hybrid

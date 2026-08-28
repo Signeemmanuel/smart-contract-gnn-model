@@ -51,3 +51,7 @@ dev = [
 # built wheel, so the back end can never accidentally import training code.
 include = ["scgnn*"]
 exclude = ["training*", "tests*", "scripts*", "configs*", "data*"]
+
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
