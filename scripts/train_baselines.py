@@ -253,34 +253,36 @@ def _content_hashes_for(contract_ids, args) -> set[str]:
 def _rows_with_paths(args, split) -> list[dict]:
     """Processed-split rows carrying source path + labels, for the sequence model.
 
-    The processed index stores record paths, not .sol paths, so this reads the
-    contract source path from the build's id->path sidecar if present
-    (data/processed_*/source_paths.json), else falls back to the manifest-style
-    path stored on the record. When neither exists (older build), the sequence
-    baseline cannot locate source text and raises a clear error."""
+    Reads source paths from data/processed_*/source_paths.json (contract_id ->
+    .sol). Rows whose source was not recovered are SKIPPED (not fatal): the
+    baseline trains on the recovered subset and reports coverage, so a partial
+    re-fetch degrades gracefully. Only an empty split is fatal."""
     data_dir = Path(args.data_nodf)
     idx = json.loads((data_dir / f"{split}_index.json").read_text(encoding="utf-8"))
-    import torch
-    src_map = {}
     sp = data_dir / "source_paths.json"
-    if sp.exists():
-        src_map = json.loads(sp.read_text(encoding="utf-8"))
-    rows = []
+    if not sp.exists():
+        raise SystemExit(
+            f"sequence baseline needs {sp} (contract_id -> .sol path). "
+            "Run fetch_sources.py and copy source_paths.json into the processed dir.")
+    src_map = json.loads(sp.read_text(encoding="utf-8"))
+    import torch
+    rows, skipped = [], 0
     for e in idx:
         path = src_map.get(e["id"])
-        if path is None:
-            raise SystemExit(
-                "sequence baseline needs contract source paths; expected "
-                f"{sp} mapping contract_id -> .sol path. Regenerate it from the "
-                "build (the labels.parquet or the wild dir), or run only the "
-                "votes/trivial/peculiar baselines.")
+        if path is None or not Path(path).exists():
+            skipped += 1
+            continue
         y = (torch.load(e["path"], weights_only=True)["y"] >= 0.5).int().tolist()
         rows.append({"id": e["id"], "path": path,
                      "labels": {f: int(v) for f, v in zip(FLAWS, y)}})
         args._id_to_path = getattr(args, "_id_to_path", {})
         args._id_to_path[e["id"]] = path
+    if not rows:
+        raise SystemExit(f"sequence baseline: no source recovered for split {split!r}.")
+    if skipped:
+        print(f"  sequence {split}: using {len(rows)}/{len(idx)} contracts "
+              f"({skipped} without recovered source, skipped)")
     return rows
-
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
