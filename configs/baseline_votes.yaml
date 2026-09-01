@@ -1,0 +1,5 @@
+# Predict-the-union baseline: input is ONLY the four tools' per-class votes.
+# Isolates how much of the score comes from learning the tools versus the code.
+extends: base.yaml
+baseline: votes
+votes_kind: logreg       # logreg (reported) | tree (exact-disjunction ceiling)

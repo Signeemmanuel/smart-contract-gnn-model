@@ -1,0 +1,15 @@
+# CodeBERT sequence baseline: the flat-text control for the structure claim.
+# Inherits the shared recipe; overrides only what a sequence model needs, so any
+# difference from the GNN is the representation, not the protocol.
+extends: base.yaml
+baseline: sequence
+model_name: microsoft/codebert-base
+seq_mode: sliding        # sliding (reported) | truncate (head-only, weak form)
+max_tokens: 512
+window_stride: 384       # 128-token overlap between windows
+max_windows: 8           # cost bound for very long contracts
+lr: 0.00002              # 2e-5, standard for CodeBERT fine-tuning
+batch_size: 8
+grad_accum: 1
+epochs: 10
+patience: 3

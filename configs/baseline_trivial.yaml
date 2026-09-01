@@ -1,0 +1,3 @@
+# Floor baselines: majority-per-label, stratified-random, all-positive.
+extends: base.yaml
+baseline: trivial
