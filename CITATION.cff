@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software or its artefacts, please cite it as below."
+title: "smart-contract-gnn-model: a dual-graph GNN pipeline for smart-contract vulnerability detection"
+abstract: >-
+  A reproducible pipeline that detects five DASP vulnerability classes in Ethereum
+  smart contracts from dual abstract-syntax-tree and control-flow graph
+  representations, with typed data-flow enrichment, post-hoc line-level attribution,
+  and a deployed web dashboard. The repository also contains the weak-supervision
+  labelling campaign over four analysis tools, the coverage and corroboration
+  diagnostics, and the learned-baseline suite used in the accompanying papers.
+type: software
+authors:
+  - family-names: "Signe-Josue"
+    given-names: "Emmanuel"
+    orcid: "https://orcid.org/0009-0002-1428-8992"
+    affiliation: "National Higher Polytechnic Institute, The University of Bamenda"
+    email: "signeemmanuel28@gmail.com"
+  - family-names: "Uwazie"
+    given-names: "Emmanuel Chinanu"
+    orcid: "https://orcid.org/0000-0003-1429-3089"
+    affiliation: "Catholic University of Cameroon, Bamenda"
+    email: "uwazie.e@catuc.org"
+version: "v2.0-papers"
+doi: "10.5281/zenodo.22230949"
+date-released: 2026-09-01
+url: "https://github.com/Signeemmanuel/smart-contract-gnn-model"
+repository-code: "https://github.com/Signeemmanuel/smart-contract-gnn-model"
+license: Apache-2.0
+keywords:
+  - smart contracts
+  - vulnerability detection
+  - graph neural networks
+  - weak supervision
+  - program analysis
+  - reproducibility
